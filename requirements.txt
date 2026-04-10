@@ -1,0 +1,10 @@
+# NetScope — Python Dependencies
+# Core (required)
+python-nmap>=0.7.1      # Nmap Python wrapper (optional at runtime, gracefully degrades)
+requests>=2.31.0        # HTTP client for Shodan integration
+
+# Configuration
+PyYAML>=6.0.1           # YAML config file support
+
+# Optional enrichment
+# shodan>=1.31.0        # Uncomment to enable Shodan integration

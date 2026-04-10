@@ -1,0 +1,20 @@
+version: "3.9"
+
+services:
+  netscope:
+    build: .
+    image: netscope:latest
+    volumes:
+      - ./reports:/app/reports     # Reports persist on host
+      - ./logs:/app/logs           # Logs persist on host
+      - ./config:/app/config:ro    # Config read-only
+    environment:
+      - NETSCOPE_LOG_LEVEL=INFO
+      - NETSCOPE_CONCURRENCY=500
+      # - NETSCOPE_SHODAN_KEY=your_key_here
+    # Override CMD at runtime:
+    # docker compose run netscope -t 192.168.1.0/24 -p common
+    network_mode: host             # Required for raw socket scanning
+    cap_add:
+      - NET_RAW                    # Required for Nmap SYN scan
+      - NET_ADMIN

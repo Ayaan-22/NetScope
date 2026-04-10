@@ -1,0 +1,29 @@
+# NetScope Configuration Example
+# Copy this file to config/settings.yaml and modify as needed.
+
+# ── Scanning ──────────────────────────────────────────────────────────────────
+timeout: 1.5            # Per-port TCP connection timeout (seconds)
+concurrency: 500        # Max simultaneous async connections
+host_batch_size: 20     # Hosts scanned in parallel per async batch
+
+# ── Nmap ──────────────────────────────────────────────────────────────────────
+use_nmap: true          # Enrich open ports with nmap service/version detection
+nmap_timing: 4          # 0=paranoid … 5=insane (4=aggressive recommended)
+
+# ── CVE Database ──────────────────────────────────────────────────────────────
+cve_db_path: config/cve_db.csv
+
+# ── Shodan (optional) ────────────────────────────────────────────────────────
+# shodan_api_key: "YOUR_KEY_HERE"  # Or use NETSCOPE_SHODAN_KEY env variable
+
+# ── Output ────────────────────────────────────────────────────────────────────
+output_dir: reports
+report_prefix: netscope
+report_formats:
+  - html
+  - json
+  - csv
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+log_level: INFO         # DEBUG | INFO | WARNING | ERROR
+log_dir: logs
