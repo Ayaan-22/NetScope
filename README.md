@@ -12,16 +12,15 @@ Designed for security professionals, network administrators, and penetration tes
 
 1. [Features](#features)
 2. [Architecture](#architecture)
-3. [What Changed From v0 — Full Code Review](#what-changed)
-4. [Quick Start](#quick-start)
-5. [Installation](#installation)
-6. [Usage](#usage)
-7. [Configuration](#configuration)
-8. [Reports](#reports)
-9. [Testing](#testing)
-10. [Deployment](#deployment)
-11. [Security Considerations](#security)
-12. [Roadmap](#roadmap)
+3. [Quick Start](#quick-start)
+4. [Installation](#installation)
+5. [Usage](#usage)
+6. [Configuration](#configuration)
+7. [Reports](#reports)
+8. [Testing](#testing)
+9. [Deployment](#deployment)
+10. [Security Considerations](#security)
+11. [Roadmap](#roadmap)
 
 ---
 
@@ -101,55 +100,6 @@ CLI args / config
 
 ---
 
-## What Changed — Full Code Review & Refactor Log
-
-### Bugs Fixed
-
-| # | Location | Original Bug | Fix |
-|---|---|---|---|
-| 1 | `scanner.py` `expand_target()` | Manual IP arithmetic overflows subnet boundaries (e.g. /24 wraps `.255` incorrectly) | Replaced with `ipaddress.ip_network().hosts()` — stdlib, correct by design |
-| 2 | `scanner.py` `scan_ports()` | Nmap argument `-T4` with a string `"T4"` instead of integer; caused silent Nmap failures | Argument is now formatted as `-T{int}` and validated |
-| 3 | `scanner.py` `__init__()` | Hardcoded Windows paths; Linux/macOS users got `FileNotFoundError` always | Nmap path auto-detected by `python-nmap`; explicit path only used when needed |
-| 4 | `scanner.py` `match_cve()` | Double-loop caused duplicate CVE entries in results | Added `seen: set` deduplication guard |
-| 5 | `scanner2.py` `scan_port()` | Socket not closed on exception paths (resource leak) | Used `try/finally sock.close()` — now replaced by `asyncio` context approach |
-| 6 | `scanner2.py` `identify_service()` | `banner = banner.lower()` mutated outer variable; broke version parsing downstream | Local variable reassignment only |
-| 7 | Both | `risk_score = max_severity * count / 2` — score inflated wildly with many low-severity CVEs | New formula: `max_weight + log1p(count) × 0.5`, capped at 10 |
-| 8 | Both | HTML report embedded raw banner/version strings without escaping | All dynamic values passed through `html.escape()` — XSS eliminated |
-
-### Security Vulnerabilities Fixed
-
-| Severity | Issue | Fix |
-|---|---|---|
-| **Critical** | No target validation — any string passed to `nmap.scan()` / `socket.connect()` | `validate_target()` uses `ipaddress` stdlib; rejects everything invalid |
-| **Critical** | No port validation — any string passed directly to Nmap | `validate_ports()` enforces integer 1–65535 with range/list parsing |
-| **High** | Shodan API key hardcoded as empty string in source | Moved to env variable `NETSCOPE_SHODAN_KEY`; never in source |
-| **High** | XSS in HTML report — banners, versions rendered as raw HTML | Full `html.escape()` on all user-derived fields |
-| **High** | Unlimited CIDR scanning — `/1` = 2 billion hosts, no guard | Hard limit: networks larger than `/16` (65 536 hosts) are rejected |
-| **Medium** | Threads writing `self.results` concurrently without locking | Results collected via `asyncio.gather()` return values — no shared mutable state |
-| **Medium** | `socket.recv()` decoded with `.decode()` — crashes on binary banners | All decodes use `errors='replace'` |
-| **Low** | Stack traces exposed directly to end users | Critical errors caught at CLI level; clean messages shown, full trace in log file |
-
-### Performance Improvements
-
-| Area | Before | After |
-|---|---|---|
-| Concurrency model | `ThreadPoolExecutor(max_workers=50)` blocking threads | `asyncio` with configurable semaphore (default 500 concurrent connections) |
-| Per-host parallelism | Single-threaded per host in `scanner.py` | Entire port list for a host scanned in a single `asyncio.gather()` call |
-| Multi-host | Sequential in `scanner.py` | Hosts scanned in async batches of 20 |
-| Nmap enrichment | Run on every port during discovery | Run once per host on all open ports together (single Nmap invocation) |
-| Memory | Results appended to `self.results` mid-scan (thread races) | Accumulated immutably via return values and list concatenation |
-| Typical scan time (single host, 25 ports) | ~30 s (sequential) | ~1–2 s (async) |
-
-### Code Quality Improvements
-
-- **Typed throughout** — `dataclass`, `List`, `Dict`, `Optional` annotations everywhere
-- **`PortResult` and `ScanSummary` dataclasses** replace raw dicts — IDE autocomplete, safer access
-- **`CveDatabase` class** with a clean `match()` API — testable in isolation
-- **`calculate_risk_score()`** is now a pure function — no side effects, easy to unit test
-- **`validate_target()` / `validate_ports()`** are pure functions — easily tested with edge cases
-- **Separation of concerns** — engine, reporting, config, and logging are fully independent modules
-- **No global mutable state** — everything flows through `NetScopeScanner` instance methods
-- **Duplicate imports removed** (`nmap`, `socket`, `csv`, `ipaddress` were each imported twice)
 
 ---
 
@@ -157,7 +107,7 @@ CLI args / config
 
 ```bash
 # 1. Clone
-git clone https://github.com/your-org/netscope.git
+git clone https://github.com/Ayaan-22/NetScope.git
 cd netscope
 
 # 2. Install
