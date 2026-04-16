@@ -29,6 +29,7 @@ Designed for security professionals, network administrators, and penetration tes
 | Category | Capability |
 |---|---|
 | **Scanning** | Async TCP connect scan (asyncio), optional Nmap SV/OS enrichment |
+| **Discovery** | Fast ICMP ping sweep for active host enumeration (`--discover`) |
 | **Detection** | Banner grabbing with HTTP probe fallback, regex-based service/version fingerprinting |
 | **Intelligence** | Local CVE CSV database matching (wildcard + version-specific), Shodan API hook |
 | **Reporting** | HTML (dark-mode, interactive), JSON (structured), CSV (spreadsheet-ready) |
@@ -70,13 +71,14 @@ netscope/
 CLI args / config
        │
        ▼
- NetScopeScanner.run()
+  NetScopeScanner.run() / run_discovery()
        │
        ├── validate_target()        → List[str] of IPs
        ├── validate_ports()         → List[int] of ports
        │
        ▼
- scan_host_async()                  (asyncio, semaphore-bounded)
+ [if discovery] → run_discovery() (ping sweep)
+ [if scan]      → scan_host_async() (asyncio, semaphore-bounded)
        │  per open port:
        ├── banner grab (TCP recv + HTTP probe)
        ├── _try_nmap_scan()         (thread pool, optional)
@@ -157,7 +159,7 @@ docker run --rm --network host netscope -t 192.168.1.1
 ## Usage
 
 ```
-usage: netscope [-h] -t TARGET [-p PORTS] [--timeout SECS]
+usage: netscope [-h] -t TARGET [-p PORTS] [--discover] [--timeout SECS]
                 [--concurrency N] [--no-nmap] [--nmap-timing {0-5}]
                 [--cve-db PATH] [--output-dir DIR]
                 [--formats {html,json,csv} [...]] [--log-level LEVEL]
@@ -171,6 +173,9 @@ python main.py -t 192.168.1.1
 
 # Subnet with custom ports
 python main.py -t 192.168.1.0/24 -p 22,80,443,8080-8090
+
+# Fast host discovery (ping sweep) - no port scanning
+python main.py -t 192.168.1.0/24 --discover
 
 # Full network scan (all ports)
 python main.py -t 192.168.1.0/24 -p all

@@ -62,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Target IP, hostname, or CIDR subnet (e.g. 192.168.1.0/24)",
     )
     p.add_argument(
+        "--discover",
+        action="store_true",
+        help="Perform host discovery only (ping sweep), no port scanning",
+    )
+    p.add_argument(
         "-p", "--ports",
         default="common",
         metavar="PORTS",
@@ -166,6 +171,9 @@ async def _run(args: argparse.Namespace) -> int:
         nmap_timing=args.nmap_timing,
         cve_db_path=args.cve_db,
     )
+
+    if args.discover:
+        return await scanner.run_discovery()
 
     logger.info("Starting scan …")
     summary = await scanner.run()

@@ -474,11 +474,57 @@ class NetScopeScanner:
         )
 
     # ------------------------------------------------------------------
+    # Host Info Gathering
+    # ------------------------------------------------------------------
+
+    def _get_host_info(self, host: str) -> Tuple[str, str]:
+        """Attempt to resolve Hostname and MAC address natively."""
+        import platform
+        import subprocess
+        
+        hostname = "Unknown"
+        mac_addr = "Unknown"
+        
+        try:
+            hostname = socket.gethostbyaddr(host)[0]
+        except Exception:
+            pass
+
+        try:
+            if platform.system() == "Windows":
+                out = subprocess.check_output(["arp", "-a", host], timeout=2, creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0).decode(errors="ignore")
+                for line in out.splitlines():
+                    if host in line:
+                        parts = line.split()
+                        if len(parts) >= 2 and "-" in parts[1]:
+                            mac_addr = parts[1].replace("-", ":")
+                            break
+            else:
+                out = subprocess.check_output(["arp", "-n", host], timeout=2).decode(errors="ignore")
+                for line in out.splitlines():
+                    if host in line:
+                        parts = line.split()
+                        for p in parts:
+                            if ":" in p and len(p.split(":")) == 6:
+                                mac_addr = p
+                                break
+        except Exception:
+            pass
+            
+        return hostname, mac_addr
+
+    # ------------------------------------------------------------------
     # Scan a single host
     # ------------------------------------------------------------------
 
     async def _scan_single_host(self, host: str) -> List[PortResult]:
         logger.info("Scanning host %s …", host)
+        
+        # Print Host Information
+        hostname, mac_addr = self._get_host_info(host)
+        logger.info("  [i] Hostname : %s", hostname)
+        logger.info("  [i] MAC Addr : %s", mac_addr)
+
         open_ports_raw = await scan_host_async(
             host, self.ports, self.timeout, self.concurrency
         )
@@ -548,3 +594,83 @@ class NetScopeScanner:
             scan_end=self._scan_end,
             results=all_results,
         )
+
+    # ------------------------------------------------------------------
+    # Discovery mode
+    # ------------------------------------------------------------------
+
+    async def _ping_host(self, host: str, semaphore: asyncio.Semaphore) -> Optional[str]:
+        import platform
+        import subprocess
+        async with semaphore:
+            param = '-n' if platform.system().lower() == 'windows' else '-c'
+            timeout_param = '-w' if platform.system().lower() == 'windows' else '-W'
+            t_val = '1000' if platform.system().lower() == 'windows' else '1'
+            
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    'ping', param, '1', timeout_param, t_val, host,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                )
+                await proc.wait()
+                if proc.returncode == 0:
+                    return host
+            except Exception:
+                pass
+            return None
+
+    async def run_discovery(self) -> int:
+        """Run a fast host discovery sweep (ping sweep + ARP check)."""
+        print("\n" + "=" * 60)
+        print(f"  HOST DISCOVERY")
+        print(f"  Target : {self.target}")
+        print("=" * 60)
+        
+        logger.info("Sweeping %d hosts...", len(self.hosts))
+        semaphore = asyncio.Semaphore(min(self.concurrency, 100))
+        tasks = [self._ping_host(h, semaphore) for h in self.hosts]
+        
+        results = await asyncio.gather(*tasks)
+        active_hosts = set(h for h in results if h is not None)
+        
+        # Fallback: Check ARP cache for stealthy devices (like phones) that drop ICMP
+        import platform
+        import subprocess
+        try:
+            if platform.system() == "Windows":
+                out = subprocess.check_output(
+                    ["arp", "-a"], 
+                    timeout=2, 
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                ).decode(errors="ignore")
+            else:
+                out = subprocess.check_output(["arp", "-n"], timeout=2).decode(errors="ignore")
+                
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 2:
+                    ip = parts[0].strip("()")
+                    mac = parts[1]
+                    # Ignore broadcast IP and multicast MACs
+                    if ip in self.hosts and mac != "ff-ff-ff-ff-ff-ff" and mac != "ff:ff:ff:ff:ff:ff":
+                        active_hosts.add(ip)
+        except Exception:
+            pass
+
+        # Sort IP addresses properly
+        active_hosts_list = sorted(list(active_hosts), key=lambda ip: [int(x) for x in ip.split('.')])
+        
+        print("\n  Active Hosts:")
+        print(f"  {'IP Address':<18} {'MAC Address':<20} {'Hostname'}")
+        print("  " + "-" * 56)
+        
+        for host in active_hosts_list:
+            hostname, mac = self._get_host_info(host)
+            print(f"  {host:<18} {mac:<20} {hostname}")
+            
+        print("\n" + "=" * 60)
+        print(f"  Discovery complete. Found {len(active_hosts_list)} active hosts.")
+        print("=" * 60 + "\n")
+        return 0
