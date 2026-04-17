@@ -2,19 +2,39 @@
 NetScope Scanner Engine
 Core scanning logic with async port scanning, service detection,
 banner grabbing, and CVE matching.
+
+Phase 1 — Critical bug fixes:
+  BUG-1  asyncio.get_event_loop() → asyncio.get_running_loop()
+  BUG-2  HTTP probe sends correct Host header (host variable, not literal "target")
+  BUG-3  Blocking subprocess.check_output() in run_discovery() wrapped in executor
+  BUG-4  Nmap port cap of 100 replaced with chunked calls (no silent truncation)
+  BUG-5  CVE family matching replaced with explicit whitelist map (no false positives)
+  BUG-6  ThreadPoolExecutor created once in __init__ and reused (not per-host)
+
+Phase 2 — Design fixes:
+  DESIGN-1  _get_host_info results cached on scanner instance (resolved once per host)
+  DESIGN-2  hosts_scanned metric fixed: ScanSummary now distinguishes hosts_targeted
+            (all IPs in the CIDR) from hosts_with_results (hosts with ≥1 open port)
+  DESIGN-3  YAML / env-var load order corrected: defaults → YAML → env vars
+            (env vars now always win, previously YAML overwrote them)
+  DESIGN-4  host_batch_size is now a constructor parameter (was a hard-coded magic
+            number 20 buried in run()); exposed via ScanConfig and CLI --batch-size
 """
 
 import asyncio
+import math
+import platform
 import socket
+import subprocess
 import re
 import csv
 import logging
 import ipaddress
+import concurrent.futures
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 from datetime import datetime
-import concurrent.futures
 
 logger = logging.getLogger(__name__)
 
@@ -54,13 +74,25 @@ class PortResult:
 @dataclass
 class ScanSummary:
     target: str
-    hosts_scanned: int
+    # DESIGN-2 FIX: The original single hosts_scanned field counted every IP in
+    # the CIDR range, so a /24 scan with 3 alive hosts reported "hosts_scanned: 256".
+    # We now track both values explicitly:
+    #   hosts_targeted     — total IPs in the requested range
+    #   hosts_with_results — hosts that had ≥1 open port (what users expect)
+    # The old field name is preserved as a property for backwards compatibility.
+    hosts_targeted: int
+    hosts_with_results: int
     open_ports: int
     total_vulns: int
     high_risk_hosts: List[str]
     scan_start: str
     scan_end: str
     results: List[PortResult]
+
+    @property
+    def hosts_scanned(self) -> int:
+        """Backwards-compatible alias → hosts_with_results."""
+        return self.hosts_with_results
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +118,7 @@ def validate_target(target: str) -> List[str]:
             if network.num_addresses > 65536:
                 raise ValueError(
                     f"Network {target} has {network.num_addresses} addresses. "
-                    "Limit scans to /16 or smaller."
+                    "Limit scans to 65536 hosts (/16) or smaller."
                 )
             hosts = [str(ip) for ip in network.hosts()]
         except ValueError as exc:
@@ -217,13 +249,21 @@ async def _check_port(
             # Some services send a banner immediately
             data = await asyncio.wait_for(reader.read(1024), timeout=2.0)
             banner = data.decode(errors="replace").strip()
-        except asyncio.TimeoutError:
+        except ConnectionResetError:
+            # If the server resets the connection immediately after handshake,
+            # it is effectively closed/filtered.
+            return None
+        except (asyncio.TimeoutError, OSError):
             pass
 
         if not banner:
-            # HTTP probe
+            # FIX BUG-2: HTTP probe now sends the actual host, not the literal
+            # string "target". Virtualhost-based servers (most modern HTTP servers)
+            # route requests by the Host header; "target" always returns 404 or a
+            # wrong vhost response, poisoning every HTTP banner grab.
             try:
-                writer.write(b"HEAD / HTTP/1.0\r\nHost: target\r\n\r\n")
+                probe = f"HEAD / HTTP/1.0\r\nHost: {host}\r\n\r\n".encode()
+                writer.write(probe)
                 await writer.drain()
                 data = await asyncio.wait_for(reader.read(1024), timeout=2.0)
                 banner = data.decode(errors="replace").strip()
@@ -256,6 +296,13 @@ async def scan_host_async(
 # Nmap integration (optional, richer fingerprinting)
 # ---------------------------------------------------------------------------
 
+# FIX BUG-4: Chunk size for Nmap calls.
+# The original code silently truncated to ports[:100], dropping all ports
+# above index 100 from Nmap enrichment with no warning.  We now call Nmap
+# in chunks of NMAP_CHUNK_SIZE so every open port gets enriched.
+NMAP_CHUNK_SIZE = 100
+
+
 def _try_nmap_scan(
     host: str,
     ports: List[int],
@@ -265,6 +312,9 @@ def _try_nmap_scan(
     Run an Nmap service/version scan on specific open ports.
     Returns a dict keyed by port with service metadata.
     Falls back gracefully if Nmap is unavailable.
+
+    BUG-4 FIX: Nmap is called in chunks of NMAP_CHUNK_SIZE instead of
+    silently dropping all ports beyond the first 100.
     """
     try:
         import nmap  # type: ignore
@@ -272,36 +322,77 @@ def _try_nmap_scan(
         logger.debug("python-nmap not installed; skipping Nmap enrichment.")
         return {}
 
+    enriched: Dict[int, Dict] = {}
     nm = nmap.PortScanner()
-
-    port_str = ",".join(str(p) for p in ports[:100])  # cap at 100 ports per call
     args = f"-sV -T{timing} --version-intensity 5 -O --script=banner"
 
-    try:
-        nm.scan(host, ports=port_str, arguments=args, timeout=120)
-    except Exception as exc:
-        logger.warning("Nmap scan failed for %s: %s", host, exc)
-        return {}
+    # Chunk the port list so we never silently drop ports
+    for chunk_start in range(0, len(ports), NMAP_CHUNK_SIZE):
+        chunk = ports[chunk_start : chunk_start + NMAP_CHUNK_SIZE]
+        port_str = ",".join(str(p) for p in chunk)
 
-    enriched: Dict[int, Dict] = {}
-    if host not in nm.all_hosts():
-        return enriched
+        try:
+            nm.scan(host, ports=port_str, arguments=args, timeout=120)
+        except Exception as exc:
+            logger.warning("Nmap scan failed for %s (ports %s…): %s",
+                           host, chunk[0], exc)
+            continue  # try remaining chunks even if one fails
 
-    for proto in nm[host].all_protocols():
-        for port, info in nm[host][proto].items():
-            enriched[int(port)] = {
-                "service": info.get("name", "unknown"),
-                "version": info.get("version", "unknown"),
-                "product": info.get("product", ""),
-                "extrainfo": info.get("extrainfo", ""),
-                "banner": info.get("script", {}).get("banner", ""),
-            }
+        if host not in nm.all_hosts():
+            continue
+
+        for proto in nm[host].all_protocols():
+            for port, info in nm[host][proto].items():
+                enriched[int(port)] = {
+                    "service": info.get("name", "unknown"),
+                    "version": info.get("version", "unknown"),
+                    "product": info.get("product", ""),
+                    "extrainfo": info.get("extrainfo", ""),
+                    "banner": info.get("script", {}).get("banner", ""),
+                }
+
     return enriched
 
 
 # ---------------------------------------------------------------------------
 # CVE database
 # ---------------------------------------------------------------------------
+
+# FIX BUG-5: Explicit service-family whitelist replaces the previous
+# substring containment check (`key in service or service in key`).
+#
+# The old logic caused "http" to match "https", "http-proxy", "xmlhttp",
+# and vice versa — so scanning port 8080 (http-proxy) incorrectly inherited
+# every Critical Apache CVE tagged for "http".  The whitelist below maps each
+# canonical CVE-DB service name to the set of detected service names that
+# should inherit its entries.  Matches are exact (set membership), not
+# substring, so false positives are eliminated.
+_SERVICE_FAMILY_MAP: Dict[str, set] = {
+    "http":       {"http", "http-proxy", "http-alt"},
+    "https":      {"https", "https-alt"},
+    "ssh":        {"ssh"},
+    "ftp":        {"ftp"},
+    "smtp":       {"smtp", "smtp-submission"},
+    "pop3":       {"pop3", "pop3s"},
+    "imap":       {"imap", "imaps"},
+    "smb":        {"smb", "netbios-ssn", "microsoft-ds"},
+    "mysql":      {"mysql"},
+    "postgresql": {"postgresql"},
+    "redis":      {"redis"},
+    "mongodb":    {"mongodb"},
+    "vnc":        {"vnc"},
+    "rdp":        {"rdp"},
+    "telnet":     {"telnet"},
+    "dns":        {"dns"},
+    "rpcbind":    {"rpcbind", "msrpc"},
+}
+
+# Reverse index: detected-service → set of CVE-DB keys to query
+_DETECTED_TO_CVE_KEYS: Dict[str, set] = {}
+for _cve_key, _detected_set in _SERVICE_FAMILY_MAP.items():
+    for _det in _detected_set:
+        _DETECTED_TO_CVE_KEYS.setdefault(_det, set()).add(_cve_key)
+
 
 class CveDatabase:
     """Load and query a local CVE CSV database."""
@@ -343,16 +434,22 @@ class CveDatabase:
             logger.error("Failed to load CVE database: %s", exc)
 
     def match(self, service: str, version: str) -> List[Dict]:
-        """Return matching CVEs for a service/version pair."""
+        """
+        Return matching CVEs for a service/version pair.
+
+        BUG-5 FIX: Uses an explicit whitelist (_DETECTED_TO_CVE_KEYS) instead
+        of substring containment.  A detected service of "http-proxy" now only
+        inherits CVEs whose DB key is explicitly mapped to it (currently "http"),
+        not every key that happens to contain "http" as a substring.
+        """
         service = service.lower()
         matches: List[Dict] = []
         seen: set = set()
 
-        candidate_keys = {service}
-        # Also match service family (e.g. "http" matches "http-proxy")
-        for key in self._db:
-            if key in service or service in key:
-                candidate_keys.add(key)
+        # Build the set of CVE-DB keys to query for this detected service
+        candidate_keys: set = _DETECTED_TO_CVE_KEYS.get(service, set())
+        # Always include the service name itself in case it is a CVE-DB key
+        candidate_keys = candidate_keys | {service}
 
         for key in candidate_keys:
             for entry in self._db.get(key, []):
@@ -383,14 +480,81 @@ def calculate_risk_score(vulns: List[Dict]) -> float:
     """
     Risk score 0–10 based on severity distribution.
     Formula: max_severity_weight + log-scaled count bonus, capped at 10.
+
+    Note: math is now imported at module level (see top of file) instead of
+    inside this function, which is called once per open port across all hosts.
     """
     if not vulns:
         return 0.0
     weights = [_SEVERITY_WEIGHTS.get(v.get("severity", ""), 0.0) for v in vulns]
     max_w = max(weights)
-    import math
+    if max_w == 0.0:
+        return 0.0
     count_bonus = math.log1p(len(vulns)) * 0.5
     return min(max_w + count_bonus, 10.0)
+
+
+# ---------------------------------------------------------------------------
+# Host info helpers  (platform / subprocess imported at module level)
+# ---------------------------------------------------------------------------
+
+def _read_arp_cache_sync(host: str) -> str:
+    """
+    Synchronous ARP lookup — intended to be run in a thread executor,
+    never called directly from an async context.
+
+    platform and subprocess are imported at module level (BUG-3 / general
+    improvement) so this function does not trigger repeated import overhead.
+    """
+    try:
+        if platform.system() == "Windows":
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            out = subprocess.check_output(
+                ["arp", "-a", host], timeout=2,
+                creationflags=flags,
+            ).decode(errors="ignore")
+        else:
+            out = subprocess.check_output(
+                ["arp", "-n", host], timeout=2,
+            ).decode(errors="ignore")
+    except Exception:
+        return "Unknown"
+
+    for line in out.splitlines():
+        if host in line:
+            parts = line.split()
+            for part in parts:
+                # Linux: xx:xx:xx:xx:xx:xx   Windows: xx-xx-xx-xx-xx-xx
+                normalised = part.replace("-", ":")
+                if len(normalised.split(":")) == 6:
+                    return normalised
+    return "Unknown"
+
+
+def _read_arp_cache_all_sync() -> List[Tuple[str, str]]:
+    """
+    Read the full ARP table synchronously.  Returns list of (ip, mac) pairs.
+    Intended to run in a thread executor.
+    """
+    try:
+        if platform.system() == "Windows":
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            out = subprocess.check_output(
+                ["arp", "-a"], timeout=2, creationflags=flags,
+            ).decode(errors="ignore")
+        else:
+            out = subprocess.check_output(["arp", "-n"], timeout=2).decode(errors="ignore")
+    except Exception:
+        return []
+
+    entries: List[Tuple[str, str]] = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            ip = parts[0].strip("()")
+            mac = parts[1].replace("-", ":")
+            entries.append((ip, mac))
+    return entries
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +576,10 @@ class NetScopeScanner:
         use_nmap: bool = True,
         nmap_timing: int = 4,
         cve_db_path: str = "config/cve_db.csv",
+        # DESIGN-4 FIX: host_batch_size was a hard-coded magic number (20) buried
+        # inside run().  It is now a first-class constructor parameter so it can be
+        # set via ScanConfig / CLI --batch-size without touching source code.
+        host_batch_size: int = 20,
     ):
         self.target = target
         self.hosts = validate_target(target)
@@ -420,16 +588,39 @@ class NetScopeScanner:
         self.concurrency = concurrency
         self.use_nmap = use_nmap
         self.nmap_timing = nmap_timing
+        self.host_batch_size = host_batch_size
         self.cve_db = CveDatabase(cve_db_path)
         self._results: List[PortResult] = []
         self._scan_start: Optional[str] = None
         self._scan_end: Optional[str] = None
+
+        # BUG-6 FIX: Single shared executor created at init time and reused
+        # across all hosts.  Shut down via close() or context-manager protocol.
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="netscope-nmap"
+        )
+
+        # DESIGN-1 FIX: Cache hostname/MAC lookups so each host is resolved
+        # at most once even when called from both discovery and scan paths.
+        self._host_info_cache: Dict[str, Tuple[str, str]] = {}
+
         logger.info(
-            "Scanner initialised. Hosts: %d, Ports: %d, Concurrency: %d",
+            "Scanner initialised. Hosts: %d, Ports: %d, Concurrency: %d, Batch: %d",
             len(self.hosts),
             len(self.ports),
             self.concurrency,
+            self.host_batch_size,
         )
+
+    def close(self) -> None:
+        """Release the shared thread-pool executor."""
+        self._executor.shutdown(wait=False)
+
+    def __enter__(self) -> "NetScopeScanner":
+        return self
+
+    def __exit__(self, *_) -> None:
+        self.close()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -474,44 +665,37 @@ class NetScopeScanner:
         )
 
     # ------------------------------------------------------------------
-    # Host Info Gathering
+    # Host info gathering  (cached + async-safe)
     # ------------------------------------------------------------------
 
-    def _get_host_info(self, host: str) -> Tuple[str, str]:
-        """Attempt to resolve Hostname and MAC address natively."""
-        import platform
-        import subprocess
-        
+    async def _get_host_info_async(self, host: str) -> Tuple[str, str]:
+        """
+        Resolve hostname and MAC address, using a cache so each host is
+        looked up at most once.  The blocking ARP call runs in the shared
+        executor so it never blocks the event loop.
+        """
+        if host in self._host_info_cache:
+            return self._host_info_cache[host]
+
+        # Reverse-DNS lookup — socket.gethostbyaddr is blocking but fast
+        loop = asyncio.get_running_loop()  # FIX BUG-1 (applied here too)
         hostname = "Unknown"
-        mac_addr = "Unknown"
-        
         try:
-            hostname = socket.gethostbyaddr(host)[0]
+            hostname = await loop.run_in_executor(
+                self._executor, socket.gethostbyaddr, host
+            )
+            hostname = hostname[0]
         except Exception:
             pass
 
-        try:
-            if platform.system() == "Windows":
-                out = subprocess.check_output(["arp", "-a", host], timeout=2, creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0).decode(errors="ignore")
-                for line in out.splitlines():
-                    if host in line:
-                        parts = line.split()
-                        if len(parts) >= 2 and "-" in parts[1]:
-                            mac_addr = parts[1].replace("-", ":")
-                            break
-            else:
-                out = subprocess.check_output(["arp", "-n", host], timeout=2).decode(errors="ignore")
-                for line in out.splitlines():
-                    if host in line:
-                        parts = line.split()
-                        for p in parts:
-                            if ":" in p and len(p.split(":")) == 6:
-                                mac_addr = p
-                                break
-        except Exception:
-            pass
-            
-        return hostname, mac_addr
+        # ARP lookup — blocking subprocess, run in executor
+        mac_addr = await loop.run_in_executor(
+            self._executor, _read_arp_cache_sync, host
+        )
+
+        result = (hostname, mac_addr)
+        self._host_info_cache[host] = result
+        return result
 
     # ------------------------------------------------------------------
     # Scan a single host
@@ -519,9 +703,8 @@ class NetScopeScanner:
 
     async def _scan_single_host(self, host: str) -> List[PortResult]:
         logger.info("Scanning host %s …", host)
-        
-        # Print Host Information
-        hostname, mac_addr = self._get_host_info(host)
+
+        hostname, mac_addr = await self._get_host_info_async(host)
         logger.info("  [i] Hostname : %s", hostname)
         logger.info("  [i] MAC Addr : %s", mac_addr)
 
@@ -536,14 +719,14 @@ class NetScopeScanner:
         open_port_nums = [p for _, p, _ in open_ports_raw]
         banners = {p: b for _, p, b in open_ports_raw}
 
-        # Optional Nmap enrichment (blocking — run in thread pool)
+        # Optional Nmap enrichment — runs in the shared executor (BUG-6 FIX)
         nmap_data: Dict[int, Dict] = {}
         if self.use_nmap:
-            loop = asyncio.get_event_loop()
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                nmap_data = await loop.run_in_executor(
-                    pool, self._enrich_with_nmap, host, open_port_nums
-                )
+            # FIX BUG-1: use get_running_loop(), not get_event_loop()
+            loop = asyncio.get_running_loop()
+            nmap_data = await loop.run_in_executor(
+                self._executor, self._enrich_with_nmap, host, open_port_nums
+            )
 
         results: List[PortResult] = []
         for port in open_port_nums:
@@ -567,10 +750,9 @@ class NetScopeScanner:
         self._scan_start = datetime.utcnow().isoformat()
         all_results: List[PortResult] = []
 
-        # Scan hosts concurrently (but not all at once to be polite)
-        batch_size = 20
-        for i in range(0, len(self.hosts), batch_size):
-            batch = self.hosts[i : i + batch_size]
+        # Scan hosts concurrently in polite batches (DESIGN-4: configurable batch size)
+        for i in range(0, len(self.hosts), self.host_batch_size):
+            batch = self.hosts[i : i + self.host_batch_size]
             tasks = [self._scan_single_host(h) for h in batch]
             batched = await asyncio.gather(*tasks)
             for host_results in batched:
@@ -584,9 +766,13 @@ class NetScopeScanner:
         )
         total_vulns = sum(len(r.vulnerabilities) for r in all_results)
 
+        # DESIGN-2 FIX: populate both new fields separately
+        hosts_with_results = len({r.host for r in all_results})
+
         return ScanSummary(
             target=self.target,
-            hosts_scanned=len(self.hosts),
+            hosts_targeted=len(self.hosts),        # every IP in the CIDR range
+            hosts_with_results=hosts_with_results, # hosts with ≥1 open port
             open_ports=len(all_results),
             total_vulns=total_vulns,
             high_risk_hosts=high_risk,
@@ -600,19 +786,23 @@ class NetScopeScanner:
     # ------------------------------------------------------------------
 
     async def _ping_host(self, host: str, semaphore: asyncio.Semaphore) -> Optional[str]:
-        import platform
-        import subprocess
+        """
+        Async ICMP ping using a subprocess.  platform/subprocess are now
+        module-level imports so they are not re-imported on every coroutine
+        invocation.
+        """
         async with semaphore:
-            param = '-n' if platform.system().lower() == 'windows' else '-c'
-            timeout_param = '-w' if platform.system().lower() == 'windows' else '-W'
-            t_val = '1000' if platform.system().lower() == 'windows' else '1'
-            
+            param = "-n" if platform.system().lower() == "windows" else "-c"
+            timeout_param = "-w" if platform.system().lower() == "windows" else "-W"
+            t_val = "1000" if platform.system().lower() == "windows" else "1"
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    'ping', param, '1', timeout_param, t_val, host,
+                    "ping", param, "1", timeout_param, t_val, host,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
-                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                    creationflags=flags,
                 )
                 await proc.wait()
                 if proc.returncode == 0:
@@ -621,55 +811,83 @@ class NetScopeScanner:
                 pass
             return None
 
+    async def _nudge_host(self, host: str, semaphore: asyncio.Semaphore) -> Optional[str]:
+        """
+        Force the OS to perform an ARP request by attempting a sub-second
+        TCP connection to common ports.
+        """
+        # We check a few common ports to increase the chance of a response,
+        # but the primary goal is triggering the OS-level ARP lookup.
+        target_ports = [80, 443]
+        async with semaphore:
+            for port in target_ports:
+                try:
+                    _, writer = await asyncio.wait_for(
+                        asyncio.open_connection(host, port),
+                        timeout=0.3
+                    )
+                    writer.close()
+                    await writer.wait_closed()
+                    return host
+                except (ConnectionRefusedError, OSError, asyncio.TimeoutError):
+                    # Even a refusal or timeout means the OS attempted ARP
+                    continue
+            return None
+
     async def run_discovery(self) -> int:
-        """Run a fast host discovery sweep (ping sweep + ARP check)."""
+        """
+        Run a fast host discovery sweep (ping sweep + ARP cache check).
+
+        FIX BUG-3: The ARP cache read was previously a blocking
+        subprocess.check_output() call made directly inside an async
+        function.  It now runs via loop.run_in_executor() so the event
+        loop is never blocked.
+        """
         print("\n" + "=" * 60)
         print(f"  HOST DISCOVERY")
         print(f"  Target : {self.target}")
         print("=" * 60)
-        
-        logger.info("Sweeping %d hosts...", len(self.hosts))
-        semaphore = asyncio.Semaphore(min(self.concurrency, 100))
-        tasks = [self._ping_host(h, semaphore) for h in self.hosts]
-        
-        results = await asyncio.gather(*tasks)
-        active_hosts = set(h for h in results if h is not None)
-        
-        # Fallback: Check ARP cache for stealthy devices (like phones) that drop ICMP
-        import platform
-        import subprocess
-        try:
-            if platform.system() == "Windows":
-                out = subprocess.check_output(
-                    ["arp", "-a"], 
-                    timeout=2, 
-                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
-                ).decode(errors="ignore")
-            else:
-                out = subprocess.check_output(["arp", "-n"], timeout=2).decode(errors="ignore")
-                
-            for line in out.splitlines():
-                parts = line.split()
-                if len(parts) >= 2:
-                    ip = parts[0].strip("()")
-                    mac = parts[1]
-                    # Ignore broadcast IP and multicast MACs
-                    if ip in self.hosts and mac != "ff-ff-ff-ff-ff-ff" and mac != "ff:ff:ff:ff:ff:ff":
-                        active_hosts.add(ip)
-        except Exception:
-            pass
+
+        logger.info("Sweeping %d hosts with ICMP + TCP nudges...", len(self.hosts))
+        semaphore = asyncio.Semaphore(min(self.concurrency, 200))
+
+        # Run both ICMP pings and TCP nudges in parallel to maximize speed
+        # while forcing the ARP cache to populate.
+        ping_tasks = [self._ping_host(h, semaphore) for h in self.hosts]
+        nudge_tasks = [self._nudge_host(h, semaphore) for h in self.hosts]
+
+        # Gather all results
+        results = await asyncio.gather(*(ping_tasks + nudge_tasks))
+        active_hosts: set = {h for h in results if h is not None}
+
+        # FIX BUG-3: ARP cache fallback now runs in the executor, not inline
+        loop = asyncio.get_running_loop()  # BUG-1 pattern applied here too
+        arp_entries = await loop.run_in_executor(
+            self._executor, _read_arp_cache_all_sync
+        )
+
+        hosts_set = set(self.hosts)
+        for ip, mac in arp_entries:
+            if (
+                ip in hosts_set
+                and mac not in ("ff:ff:ff:ff:ff:ff", "ff-ff-ff-ff-ff-ff")
+            ):
+                active_hosts.add(ip)
 
         # Sort IP addresses properly
-        active_hosts_list = sorted(list(active_hosts), key=lambda ip: [int(x) for x in ip.split('.')])
-        
+        active_hosts_list = sorted(
+            active_hosts,
+            key=lambda ip: [int(x) for x in ip.split(".")],
+        )
+
         print("\n  Active Hosts:")
         print(f"  {'IP Address':<18} {'MAC Address':<20} {'Hostname'}")
         print("  " + "-" * 56)
-        
+
         for host in active_hosts_list:
-            hostname, mac = self._get_host_info(host)
+            hostname, mac = await self._get_host_info_async(host)
             print(f"  {host:<18} {mac:<20} {hostname}")
-            
+
         print("\n" + "=" * 60)
         print(f"  Discovery complete. Found {len(active_hosts_list)} active hosts.")
         print("=" * 60 + "\n")

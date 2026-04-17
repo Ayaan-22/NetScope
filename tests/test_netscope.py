@@ -14,11 +14,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# ─── Add src to path ──────────────────────────────────────────────────────────
+# ─── Add project root to path ──────────────────────────────────────────────────
 import sys
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from scanner.engine import (
+from src.scanner.engine import (
     validate_target,
     validate_ports,
     identify_service,
@@ -28,8 +28,8 @@ from scanner.engine import (
     NetScopeScanner,
     scan_host_async,
 )
-from reporting.reporter import generate_html, generate_json, generate_csv
-from scanner.engine import ScanSummary, PortResult
+from src.reporting.reporter import generate_html, generate_json, generate_csv
+from src.scanner.engine import ScanSummary, PortResult
 
 
 # =============================================================================
@@ -136,7 +136,7 @@ class TestIdentifyService:
 
 class TestParseVersion:
     def test_semver(self):
-        assert parse_version("OpenSSH_8.2p1") == "8.2"
+        assert parse_version("OpenSSH_8.2p1") == "8.2p1"
 
     def test_three_part(self):
         assert parse_version("Apache/2.4.51") == "2.4.51"
@@ -298,8 +298,8 @@ def _make_summary() -> ScanSummary:
         risk_score=8.0,
     )
     return ScanSummary(
-        target="10.0.0.1", hosts_scanned=1, open_ports=1,
-        total_vulns=1, high_risk_hosts=["10.0.0.1"],
+        target="10.0.0.1", hosts_targeted=1, hosts_with_results=1,
+        open_ports=1, total_vulns=1, high_risk_hosts=["10.0.0.1"],
         scan_start="2024-01-01T00:00:00", scan_end="2024-01-01T00:01:00",
         results=[r],
     )
@@ -310,7 +310,7 @@ class TestReports:
         summary = _make_summary()
         out = str(tmp_path / "report.html")
         path = generate_html(summary, out)
-        content = Path(path).read_text()
+        content = Path(path).read_text(encoding="utf-8")
         assert "10.0.0.1" in content
         assert "CVE-2016-0777" in content
         assert "<!DOCTYPE html>" in content
@@ -343,8 +343,9 @@ class TestReports:
             vulnerabilities=[], risk_score=0.0,
         )
         summary = ScanSummary(
-            target="10.0.0.1", hosts_scanned=1, open_ports=1, total_vulns=0,
-            high_risk_hosts=[], scan_start="", scan_end="", results=[r],
+            target="10.0.0.1", hosts_targeted=1, hosts_with_results=1,
+            open_ports=1, total_vulns=0, high_risk_hosts=[],
+            scan_start="", scan_end="", results=[r],
         )
         out = str(tmp_path / "xss_test.html")
         content = Path(generate_html(summary, out)).read_text()

@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from scanner.engine import ScanSummary, PortResult
+from src.scanner.engine import ScanSummary, PortResult
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ _HTML_TEMPLATE = """\
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>NetScope — Vulnerability Report</title>
+<title>NetScope - Vulnerability Report</title>
 <style>
   :root {{
     --bg: #0d1117; --surface: #161b22; --border: #30363d;
@@ -67,7 +67,7 @@ _HTML_TEMPLATE = """\
 </style>
 </head>
 <body>
-<h1>🔍 NetScope — Vulnerability Report</h1>
+<h1>[!] NetScope - Vulnerability Report</h1>
 <p style="color:var(--muted);font-size:.85rem;">Generated {timestamp} UTC</p>
 
 <div class="meta">
@@ -90,7 +90,7 @@ _HTML_TEMPLATE = """\
 {rows}
 </tbody>
 </table>
-<footer>NetScope · Scan started {scan_start} · ended {scan_end}</footer>
+<footer>NetScope | Scan started {scan_start} | ended {scan_end}</footer>
 </body>
 </html>
 """
@@ -119,16 +119,16 @@ def _build_row(r: PortResult) -> str:
     rc = _risk_class(r.risk_score)
     vuln_items = "".join(
         f'<li>{_severity_badge(v["severity"])} '
-        f'<strong>{html_lib.escape(v["cve_id"])}</strong> — '
+        f'<strong>{html_lib.escape(v["cve_id"])}</strong> - '
         f'{html_lib.escape(v["description"][:120])}</li>'
         for v in r.vulnerabilities
     )
     vuln_cell = (
         f'<ul class="vuln-list">{vuln_items}</ul>'
         if vuln_items
-        else '<span class="none">—</span>'
+        else '<span class="none">-</span>'
     )
-    banner_display = html_lib.escape(r.banner[:160]) + ("…" if len(r.banner) > 160 else "")
+    banner_display = html_lib.escape(r.banner[:160]) + ("..." if len(r.banner) > 160 else "")
     return (
         f"<tr>"
         f"<td>{html_lib.escape(r.host)}</td>"
@@ -152,7 +152,7 @@ def generate_html(summary: ScanSummary, output_path: str = "reports/report.html"
         high_risk_section = (
             f'<p style="background:#1c0a0a;border:1px solid var(--crit);'
             f'border-radius:8px;padding:.75rem 1rem;margin-bottom:1rem;">'
-            f'⚠️ <strong>High-Risk Hosts:</strong> {hosts_str}</p>'
+            f'[!] <strong>High-Risk Hosts:</strong> {hosts_str}</p>'
         )
     else:
         high_risk_section = ""
