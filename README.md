@@ -1,6 +1,6 @@
-# 🔍 NetScope - Network Vulnerability Scanner - v1.2.0
+# 🔍 NetScope - Network Vulnerability Scanner - v2.0.0
 
-A production-grade, async network vulnerability scanner built in Python.Designed for security professionals, network administrators, and penetration testers.
+A production-grade, async network vulnerability scanner built in Python. Designed for security professionals, network administrators, and penetration testers.
 
 > ⚠️ **Legal Notice:** Only scan networks and hosts you own or have **explicit written permission** to test.
 > Unauthorized port scanning may violate the Computer Fraud and Abuse Act (CFAA), the Computer Misuse Act, and equivalent laws worldwide.
@@ -15,7 +15,7 @@ A production-grade, async network vulnerability scanner built in Python.Designed
 4. [Installation](#installation)
 5. [Usage](#usage)
 6. [Configuration](#configuration)
-7. [Host Discovery](#host-discovery)
+7. [Host Discovery Engine](#host-discovery-engine)
 8. [Reports](#reports)
 9. [Testing](#testing)
 10. [Deployment](#deployment)
@@ -28,15 +28,14 @@ A production-grade, async network vulnerability scanner built in Python.Designed
 
 | Category         | Capability                                                                           |
 | ---------------- | ------------------------------------------------------------------------------------ |
-| **Scanning**     | Async TCP connect scan (asyncio), optional Nmap SV/OS enrichment                     |
-| **Discovery**    | Fast ICMP ping sweep for active host enumeration (`--discover`)                      |
-| **Detection**    | Banner grabbing with HTTP probe fallback, regex-based service/version fingerprinting |
-| **Intelligence** | Local CVE CSV database matching (wildcard + version-specific), Shodan API hook       |
-| **Reporting**    | HTML (dark-mode, interactive), JSON (structured), CSV (spreadsheet-ready)            |
-| **Safety**       | Input validation, CIDR limit (/16 max), XSS-escaped HTML output, non-root Docker     |
-| **Ops**          | Rotating file + colourised console logging, YAML config, env-var overrides           |
-| **Testing**      | ~94% unit/integration coverage via `pytest`, including async edge-case and logic validation |
-| **Deployment**   | Docker + Docker Compose with `network_mode: host` and `NET_RAW` capability           |
+| **Scanning**     | High-performance Async TCP connect scan, configurable batching and concurrency      |
+| **Discovery**    | **High-Fidelity Engine**: ICMP sweep + **TCP Nudge** + Nmap ARP overlay             |
+| **Detection**    | Banner grabbing with dynamic HTTP Host probing, regex-based fingerprinting          |
+| **Intelligence** | **CVSS v3.1 Integration**: Local CVE database with authoritative NVD base scores     |
+| **Reporting**    | Interactive HTML (Dark Mode), JSON (Machine-ready), and CSV (SIEM-ready)             |
+| **Safety**       | CIDR limits (/16), XSS-escaped output, shared thread-pool lifecycle management      |
+| **Ops**          | Rotating logs, YAML configuration, environment variable overrides                    |
+| **Testing**      | **~94% Coverage**: Exhaustive unit and async integration test suite (`pytest`)       |
 
 ---
 
@@ -278,23 +277,27 @@ http,*,CVE-2021-41773,Apache 2.4.49 path traversal and RCE,Critical
 
 ---
 
-## Host Discovery
+## Host Discovery Engine
 
-The `--discover` flag provides a lightweight way to map a network without performing full port scans.
+The `--discover` flag provides a multi-layered, high-fidelity discovery sweep designed to map modern networks where standard pings are often blocked by mobile devices (iOS/Android) and hardened workstations.
 
-### How it works:
+### Multi-Layer Discovery Logic:
 
-1. **ICMP Sweep**: Parallel async pings are sent to every IP in the target range.
-2. **ARP Parsing**: The scanner reads the system ARP cache to resolve MAC addresses for alive hosts.
-3. **Nudge Logic**: If a host is suspected alive but doesn't respond to ICMP (common with mobile devices), NetScope attempts a TCP "nudge" on common ports to trigger an ARP entry.
+1.  **ICMP Ping Sweep**: Parallel async pings for foundational host enumeration.
+2.  **TCP Nudge Strategy**: Attempts sub-second TCP connections to common ports (80, 443, 22, 5353, 62078). A response (SYN-ACK) or even a refusal (**RST**) provides a definitive "UP" signal and forces the target's MAC address into the system's ARP cache.
+3.  **Nmap ARP Overlay**: If Nmap is installed, NetScope leverages its advanced discovery heuristics to find hosts that traditional methods might miss.
+4.  **ARP Cache Resolution**: Reads the local ARP table to resolve MAC addresses and confirm host presence even if the host hides from active probes.
 
 **Example:**
 
 ```bash
-python main.py -t 192.168.0.0/24 --discover
+python main.py -t 192.168.1.0/24 --discover
 ```
 
-Output includes IP, MAC Address (if resolved), and Hostname.
+Output includes:
+- **IP Address**: The resolved IPv4.
+- **MAC Address**: Resolved via the nudged ARP cache.
+- **Hostname**: Resolved via reverse DNS.
 
 ## Reports
 
@@ -302,12 +305,11 @@ Three formats are generated on every scan (all to `reports/`):
 
 ### HTML Report
 
-Dark-mode, browser-viewable report with:
-
-- Summary statistics cards
-- High-risk host alert banner
-- Per-port table: host, port, service, version, risk score, banner preview, CVE list
-- Colour-coded severity badges and risk scores
+Interactive browser-viewable report features:
+- **Risk Score Cards**: Quick scan summary of critical findings.
+- **CVSS v3.1 Badges**: Automated NVD score matching (e.g., `Critical`, `High`).
+- **Interactive Tables**: Search, filter, and sort by host, port, or severity.
+- **Technical Evidence**: Full banner evidence and service versioning.
 
 ### JSON Report
 

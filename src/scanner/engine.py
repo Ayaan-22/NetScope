@@ -360,6 +360,28 @@ def _try_nmap_scan(
     return enriched
 
 
+def _try_nmap_discovery(target: str) -> set:
+    """
+    Run a fast Nmap ping sweep (-sn) to discover active hosts.
+    Returns a set of discovered IP addresses.
+    """
+    try:
+        import nmap  # type: ignore
+    except ImportError:
+        return set()
+
+    nm = nmap.PortScanner()
+    try:
+        # -sn: Ping Scan - disable port scan
+        # -PE: ICMP echo, -PS80,443: TCP SYN discovery, -PA22,80,443: TCP ACK discovery
+        # nmap ping discovery is much more advanced than our simple sweep.
+        nm.scan(hosts=target, arguments="-sn --host-timeout 5s")
+        return set(nm.all_hosts())
+    except Exception as exc:
+        logger.debug("Nmap discovery failed: %s", exc)
+        return set()
+
+
 # ---------------------------------------------------------------------------
 # CVE database
 # ---------------------------------------------------------------------------
@@ -492,7 +514,7 @@ class CveDatabase:
 # Values are kept slightly below the CVSS Critical ceiling (10.0) so that real
 # CVSS scores always rank higher than fallback-scored entries.
 _SEVERITY_WEIGHTS = {
-    "Critical": 9.0,
+    "Critical": 10.0,
     "High":     7.0,
     "Medium":   4.5,
     "Low":      2.0,
@@ -500,14 +522,6 @@ _SEVERITY_WEIGHTS = {
 }
 
 
-def calculate_risk_score(vulns: List[Dict]) -> float:
-    """
-    Risk score 0–10 based on severity distribution.
-    Formula: max_severity_weight + log-scaled count bonus, capped at 10.
-
-    Note: math is now imported at module level (see top of file) instead of
-    inside this function, which is called once per open port across all hosts.
-    """
 def calculate_risk_score(vulns: List[Dict]) -> float:
     """
     Compute a 0–10 risk score for a list of CVE matches on a single open port.
@@ -613,9 +627,13 @@ def _read_arp_cache_all_sync() -> List[Tuple[str, str]]:
     for line in out.splitlines():
         parts = line.split()
         if len(parts) >= 2:
-            ip = parts[0].strip("()")
+            ip_raw = parts[0].strip("()")
+            # Basic check to avoid header lines like "Interface:" or "Internet"
+            # on Windows/Linux ARP output.
+            if "." not in ip_raw and ":" not in ip_raw:
+                continue
             mac = parts[1].replace("-", ":")
-            entries.append((ip, mac))
+            entries.append((ip_raw, mac))
     return entries
 
 
@@ -879,19 +897,25 @@ class NetScopeScanner:
         TCP connection to common ports.
         """
         # We check a few common ports to increase the chance of a response,
-        # but the primary goal is triggering the OS-level ARP lookup.
-        target_ports = [80, 443]
+        # including mobile-specific and local service discovery ports.
+        # 80/443: Web | 22: SSH | 5353: mDNS | 62078: iOS Lockdown | 8008: Android
+        target_ports = [80, 443, 22, 5353, 62078, 8008]
         async with semaphore:
             for port in target_ports:
                 try:
+                    # Increased timeout to 1s for slow-waking mobile devices
                     _, writer = await asyncio.wait_for(
                         asyncio.open_connection(host, port),
-                        timeout=0.3
+                        timeout=1.0
                     )
                     writer.close()
                     await writer.wait_closed()
                     return host
-                except (ConnectionRefusedError, OSError, asyncio.TimeoutError):
+                except ConnectionRefusedError:
+                    # A refusal means the host is UP and responded with RST.
+                    # This is a definitive signal of an active host.
+                    return host
+                except (OSError, asyncio.TimeoutError):
                     # Even a refusal or timeout means the OS attempted ARP
                     continue
             return None
@@ -922,8 +946,19 @@ class NetScopeScanner:
         results = await asyncio.gather(*(ping_tasks + nudge_tasks))
         active_hosts: set = {h for h in results if h is not None}
 
+        loop = asyncio.get_running_loop()
+
+        # Nmap Discovery Booster (if available)
+        # Nmap's ARP scan and advanced ping discovery are much more effective
+        # on local networks than custom TCP nudges.
+        if self.use_nmap:
+            logger.info("Boosting discovery with Nmap ping sweep...")
+            nmap_hosts = await loop.run_in_executor(
+                self._executor, _try_nmap_discovery, self.target
+            )
+            active_hosts.update(nmap_hosts)
+
         # FIX BUG-3: ARP cache fallback now runs in the executor, not inline
-        loop = asyncio.get_running_loop()  # BUG-1 pattern applied here too
         arp_entries = await loop.run_in_executor(
             self._executor, _read_arp_cache_all_sync
         )

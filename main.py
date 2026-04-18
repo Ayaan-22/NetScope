@@ -43,7 +43,7 @@ BANNER = r"""
  | |\  |  __/ |_ ___) | (_| (_) | |_) |  __/
  |_| \_|\___|\__|____/ \___\___/| .__/ \___|
                                 |_|
- Network Vulnerability Scanner - v1.2.0
+ Network Vulnerability Scanner - v2.0.0
 """
 
 
