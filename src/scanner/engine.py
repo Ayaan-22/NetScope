@@ -19,6 +19,12 @@ Phase 2 — Design fixes:
             (env vars now always win, previously YAML overwrote them)
   DESIGN-4  host_batch_size is now a constructor parameter (was a hard-coded magic
             number 20 buried in run()); exposed via ScanConfig and CLI --batch-size
+
+Phase 4 — CVSS integration:
+  CVSS-1  CveDatabase._load() parses optional cvss_score + cvss_vector columns
+          from cve_db.csv v2; old DBs without those columns still load cleanly.
+  CVSS-2  calculate_risk_score() prefers the CVSS v3.1 base score when present;
+          falls back to severity-weight table for rows that predate the column.
 """
 
 import asyncio
@@ -410,6 +416,8 @@ class CveDatabase:
             with p.open(newline="", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
                 required = {"service", "version", "cve_id", "description", "severity"}
+                # cvss_score / cvss_vector are optional new columns added in
+                # cve_db.csv v2.  Old DBs without them still load cleanly.
                 if not required.issubset(set(reader.fieldnames or [])):
                     logger.error(
                         "CVE DB missing columns. Expected: %s", required
@@ -417,12 +425,23 @@ class CveDatabase:
                     return
                 for row in reader:
                     svc = row["service"].strip().lower()
+                    # Parse optional CVSS v3.1 columns — fall back to None if
+                    # absent so old single-format DBs continue to load without error.
+                    raw_score = row.get("cvss_score", "").strip()
+                    try:
+                        cvss_score: float | None = float(raw_score) if raw_score else None
+                    except ValueError:
+                        cvss_score = None
+                    cvss_vector: str | None = row.get("cvss_vector", "").strip() or None
+
                     self._db.setdefault(svc, []).append(
                         {
                             "cve_id": row["cve_id"].strip(),
                             "description": row["description"].strip(),
                             "severity": row["severity"].strip().capitalize(),
                             "version": row["version"].strip(),
+                            "cvss_score": cvss_score,    # float | None
+                            "cvss_vector": cvss_vector,  # str | None
                         }
                     )
             logger.info(
@@ -467,12 +486,17 @@ class CveDatabase:
 # Risk scoring
 # ---------------------------------------------------------------------------
 
+# Severity → weight fallback table.
+# Used ONLY when a CVE entry has no cvss_score (e.g. rows from an old DB that
+# predates the cvss_score column, or entries whose CVSS v3 score is unpublished).
+# Values are kept slightly below the CVSS Critical ceiling (10.0) so that real
+# CVSS scores always rank higher than fallback-scored entries.
 _SEVERITY_WEIGHTS = {
-    "Critical": 10.0,
-    "High": 7.5,
-    "Medium": 5.0,
-    "Low": 2.5,
-    "Info": 0.5,
+    "Critical": 9.0,
+    "High":     7.0,
+    "Medium":   4.5,
+    "Low":      2.0,
+    "Info":     0.5,
 }
 
 
@@ -484,14 +508,52 @@ def calculate_risk_score(vulns: List[Dict]) -> float:
     Note: math is now imported at module level (see top of file) instead of
     inside this function, which is called once per open port across all hosts.
     """
+def calculate_risk_score(vulns: List[Dict]) -> float:
+    """
+    Compute a 0–10 risk score for a list of CVE matches on a single open port.
+
+    Algorithm (CVSS-2):
+      Pass 1 — per-vuln base score:
+        • If the entry carries a numeric cvss_score (CVSS v3.1 base score from
+          NVD), use it directly — this is the authoritative value.
+        • Otherwise fall back to _SEVERITY_WEIGHTS[severity] so rows that
+          predate the cvss_score column still produce a meaningful score.
+      Pass 2 — aggregate:
+        • max_score  : highest individual base score in the list.
+        • count_bonus: log-scaled bonus for vuln density — many CVEs on one
+          port is worse than one, but the bonus is capped so it can never
+          dominate (≈+0 for 1 vuln, +0.35 for 2, +0.55 for 3, +1.1 for 10).
+        • final      : min(max_score + count_bonus, 10.0)
+
+    Why max + log-bonus instead of average?
+      A single Critical RCE is catastrophic regardless of how many Low vulns
+      sit alongside it.  max preserves that intuition; log-bonus provides a
+      secondary signal for vuln-dense services.
+
+    Backwards compatible: rows without cvss_score use severity weights and
+    produce scores slightly lower than the CVSS ceiling — intentionally
+    conservative to encourage keeping the DB up to date.
+    """
     if not vulns:
         return 0.0
-    weights = [_SEVERITY_WEIGHTS.get(v.get("severity", ""), 0.0) for v in vulns]
-    max_w = max(weights)
-    if max_w == 0.0:
+
+    scores: List[float] = []
+    for v in vulns:
+        cvss = v.get("cvss_score")
+        if cvss is not None:
+            # CVSS v3.1 base score — use directly (already on 0–10 scale)
+            scores.append(float(cvss))
+        else:
+            # Legacy row: derive from severity string
+            scores.append(_SEVERITY_WEIGHTS.get(v.get("severity", ""), 0.0))
+
+    max_score = max(scores)
+    if max_score == 0.0:
         return 0.0
-    count_bonus = math.log1p(len(vulns)) * 0.5
-    return min(max_w + count_bonus, 10.0)
+
+    # log1p(n-1): +0 for 1 vuln, +0.35 for 2, +0.55 for 3, +1.1 for 10
+    count_bonus = math.log1p(len(vulns) - 1) * 0.5
+    return round(min(max_score + count_bonus, 10.0), 2)
 
 
 # ---------------------------------------------------------------------------
