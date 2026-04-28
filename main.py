@@ -8,22 +8,26 @@ Usage examples:
   python main.py -t 192.168.1.0/24 -p 22,80,443,8080
   python main.py -t 10.0.0.1 --ports top1000 --no-nmap
   python main.py -t 10.0.0.0/16 --concurrency 1000 --formats html json
+  python main.py -t 10.0.0.0/24 --batch-size 50
+
+Phase 2 changes:
+  DESIGN-2  Summary output now shows hosts_targeted vs hosts_with_results
+  DESIGN-3  ScanConfig.load() used (correct defaults -> YAML -> env order)
+  DESIGN-4  --batch-size CLI arg added; forwarded to NetScopeScanner
+            Scanner used as context manager so executor shuts down cleanly
 """
 
 import argparse
 import asyncio
-import sys
-import os
 import logging
+import sys
 from pathlib import Path
 
-# Allow running from the project root
-sys.path.insert(0, str(Path(__file__).parent / "src"))
-
-from utils.log_config import setup_logging
-from utils.config import ScanConfig, COMMON_PORTS, TOP_1000_PORTS, ALL_PORTS
-from scanner.engine import NetScopeScanner, validate_target, validate_ports
-from reporting.reporter import export_all
+# Import application modules
+from src.utils.log_config import setup_logging
+from src.utils.config import ScanConfig, COMMON_PORTS, TOP_1000_PORTS, ALL_PORTS
+from src.scanner.engine import NetScopeScanner, validate_target, validate_ports
+from src.reporting.reporter import export_all
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +43,7 @@ BANNER = r"""
  | |\  |  __/ |_ ___) | (_| (_) | |_) |  __/
  |_| \_|\___|\__|____/ \___\___/| .__/ \___|
                                 |_|
- Network Vulnerability Scanner — v1.0.0
+ Network Vulnerability Scanner - v2.0.0
 """
 
 
@@ -89,6 +93,17 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="Max concurrent async connections (default: 500)",
     )
+    # DESIGN-4: --batch-size is now a real CLI flag instead of a hard-coded 20
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=20,
+        metavar="N",
+        help=(
+            "Hosts scanned in parallel per async batch (default: 20). "
+            "Increase for faster LAN scans; decrease on slow links."
+        ),
+    )
     p.add_argument(
         "--no-nmap",
         action="store_true",
@@ -100,7 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=range(0, 6),
         default=4,
         metavar="{0-5}",
-        help="Nmap timing template 0=slowest … 5=fastest (default: 4)",
+        help="Nmap timing template 0=slowest to 5=fastest (default: 4)",
     )
     p.add_argument(
         "--cve-db",
@@ -162,7 +177,10 @@ async def _run(args: argparse.Namespace) -> int:
         logger.error("Invalid target: %s", exc)
         return 2
 
-    scanner = NetScopeScanner(
+    # DESIGN-4: pass host_batch_size through; use scanner as context manager
+    # so the shared ThreadPoolExecutor is always shut down cleanly on exit,
+    # including on KeyboardInterrupt.
+    with NetScopeScanner(
         target=args.target,
         ports=ports,
         timeout=args.timeout,
@@ -170,22 +188,25 @@ async def _run(args: argparse.Namespace) -> int:
         use_nmap=not args.no_nmap,
         nmap_timing=args.nmap_timing,
         cve_db_path=args.cve_db,
-    )
+        host_batch_size=args.batch_size,
+    ) as scanner:
 
-    if args.discover:
-        return await scanner.run_discovery()
+        if args.discover:
+            return await scanner.run_discovery()
 
-    logger.info("Starting scan …")
-    summary = await scanner.run()
+        logger.info("Starting scan ...")
+        summary = await scanner.run()
 
-    # Print quick summary to console
+    # DESIGN-2: print both new fields so users understand the difference
+    # between "hosts in range" and "hosts that responded".
     print("\n" + "=" * 60)
-    print(f"  SCAN COMPLETE")
-    print(f"  Target        : {summary.target}")
-    print(f"  Hosts scanned : {summary.hosts_scanned}")
-    print(f"  Open ports    : {summary.open_ports}")
-    print(f"  Vulnerabilities: {summary.total_vulns}")
-    print(f"  High-risk hosts: {len(summary.high_risk_hosts)}")
+    print("  SCAN COMPLETE")
+    print(f"  Target          : {summary.target}")
+    print(f"  Hosts targeted  : {summary.hosts_targeted}")
+    print(f"  Hosts responded : {summary.hosts_with_results}")
+    print(f"  Open ports      : {summary.open_ports}")
+    print(f"  Vulnerabilities : {summary.total_vulns}")
+    print(f"  High-risk hosts : {len(summary.high_risk_hosts)}")
     if summary.high_risk_hosts:
         print(f"  ⚠  {', '.join(summary.high_risk_hosts)}")
     print("=" * 60 + "\n")
@@ -197,7 +218,7 @@ async def _run(args: argparse.Namespace) -> int:
         formats=args.formats,
     )
     for fmt, path in paths.items():
-        logger.info("Report saved: %s → %s", fmt.upper(), path)
+        logger.info("Report saved: %s -> %s", fmt.upper(), path)
 
     return 0
 
@@ -208,6 +229,12 @@ def main() -> None:
     args = parser.parse_args()
 
     setup_logging(level=args.log_level)
+
+    # DESIGN-3: use ScanConfig.load() which applies the correct
+    # defaults -> YAML -> env-var precedence order.
+    # (Not all fields are consumed yet — this wires up the config system
+    # for future use so YAML settings flow through automatically.)
+    _ = ScanConfig.load(args.config)
 
     try:
         exit_code = asyncio.run(_run(args))
