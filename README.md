@@ -28,12 +28,12 @@ A production-grade, async network vulnerability scanner built in Python. Designe
 
 | Category         | Capability                                                                           |
 | ---------------- | ------------------------------------------------------------------------------------ |
-| **Scanning**     | High-performance Async TCP connect scan, configurable batching and concurrency      |
-| **Discovery**    | **High-Fidelity Engine**: ICMP sweep + **TCP Nudge** + Nmap ARP overlay             |
-| **Detection**    | Banner grabbing with dynamic HTTP Host probing, regex-based fingerprinting          |
+| **Scanning**     | High-performance Async TCP connect scan, configurable batching and concurrency       |
+| **Discovery**    | **High-Fidelity Engine**: ICMP sweep + **TCP Nudge** + Nmap ARP overlay              |
+| **Detection**    | Banner grabbing with dynamic HTTP Host probing, regex-based fingerprinting           |
 | **Intelligence** | **CVSS v3.1 Integration**: Local CVE database with authoritative NVD base scores     |
 | **Reporting**    | Interactive HTML (Dark Mode), JSON (Machine-ready), and CSV (SIEM-ready)             |
-| **Safety**       | CIDR limits (/16), XSS-escaped output, shared thread-pool lifecycle management      |
+| **Safety**       | CIDR limits (/16), XSS-escaped output, shared thread-pool lifecycle management       |
 | **Ops**          | Rotating logs, YAML configuration, environment variable overrides                    |
 | **Testing**      | **~94% Coverage**: Exhaustive unit and async integration test suite (`pytest`)       |
 
@@ -41,7 +41,39 @@ A production-grade, async network vulnerability scanner built in Python. Designe
 
 ## Architecture
 
+```mermaid
+graph TD
+    A[User CLI / main.py] --> B[Config Loader]
+    B --> C[(YAML / Env Vars)]
+    B --> D[(CVE Database)]
+    
+    A --> E[Scanner Engine]
+    
+    subgraph "Engine Core"
+        E --> F[Host Discovery]
+        F --> F1[ICMP Sweep]
+        F --> F2[TCP Nudge]
+        F --> F3[ARP Enrichment]
+        
+        E --> G[Port Scanner]
+        G --> G1[Async TCP Connect]
+        G --> G2[Nmap Service Discovery]
+        G --> G3[Vulnerability Matching]
+    end
+    
+    E --> H[Metrics & Summary]
+    H --> I[Reporting Engine]
+    
+    I --> J[HTML Dark Mode]
+    I --> K[JSON Output]
+    I --> L[CSV Export]
+    
+    style E fill:#f96,stroke:#333,stroke-width:2px
+    style F fill:#bbf,stroke:#333,stroke-width:1px
+    style G fill:#bbf,stroke:#333,stroke-width:1px
 ```
+
+```text
 netscope/
 ├── main.py                    # CLI entry point
 ├── config/
@@ -68,7 +100,7 @@ netscope/
 
 ### Data Flow
 
-```
+```text
 CLI args / config
        │
        ▼
@@ -154,7 +186,7 @@ docker run --rm --network host netscope -t 192.168.1.1
 
 ## Usage
 
-```
+```text
 usage: netscope [-h] -t TARGET [-p PORTS] [--discover] [--timeout SECS]
                 [--concurrency N] [--batch-size N] [--no-nmap]
                 [--nmap-timing {0-5}] [--cve-db PATH] [--output-dir DIR]
@@ -175,7 +207,7 @@ usage: netscope [-h] -t TARGET [-p PORTS] [--discover] [--timeout SECS]
 | `--no-nmap`     | `false`         | Skip Nmap service/version enrichment                     |
 | `--config`      | `settings.yaml` | Path to YAML config file                                 |
 
-````
+````markdown
 
 ### Examples
 
@@ -281,12 +313,12 @@ http,*,CVE-2021-41773,Apache 2.4.49 path traversal and RCE,Critical
 
 The `--discover` flag provides a multi-layered, high-fidelity discovery sweep designed to map modern networks where standard pings are often blocked by mobile devices (iOS/Android) and hardened workstations.
 
-### Multi-Layer Discovery Logic:
+### Multi-Layer Discovery Logic
 
-1.  **ICMP Ping Sweep**: Parallel async pings for foundational host enumeration.
-2.  **TCP Nudge Strategy**: Attempts sub-second TCP connections to common ports (80, 443, 22, 5353, 62078). A response (SYN-ACK) or even a refusal (**RST**) provides a definitive "UP" signal and forces the target's MAC address into the system's ARP cache.
-3.  **Nmap ARP Overlay**: If Nmap is installed, NetScope leverages its advanced discovery heuristics to find hosts that traditional methods might miss.
-4.  **ARP Cache Resolution**: Reads the local ARP table to resolve MAC addresses and confirm host presence even if the host hides from active probes.
+1. **ICMP Ping Sweep**: Parallel async pings for foundational host enumeration.
+2. **TCP Nudge Strategy**: Attempts sub-second TCP connections to common ports (80, 443, 22, 5353, 62078). A response (SYN-ACK) or even a refusal (**RST**) provides a definitive "UP" signal and forces the target's MAC address into the system's ARP cache.
+3. **Nmap ARP Overlay**: If Nmap is installed, NetScope leverages its advanced discovery heuristics to find hosts that traditional methods might miss.
+4. **ARP Cache Resolution**: Reads the local ARP table to resolve MAC addresses and confirm host presence even if the host hides from active probes.
 
 **Example:**
 
@@ -295,6 +327,7 @@ python main.py -t 192.168.1.0/24 --discover
 ```
 
 Output includes:
+
 - **IP Address**: The resolved IPv4.
 - **MAC Address**: Resolved via the nudged ARP cache.
 - **Hostname**: Resolved via reverse DNS.
@@ -306,6 +339,7 @@ Three formats are generated on every scan (all to `reports/`):
 ### HTML Report
 
 Interactive browser-viewable report features:
+
 - **Risk Score Cards**: Quick scan summary of critical findings.
 - **CVSS v3.1 Badges**: Automated NVD score matching (e.g., `Critical`, `High`).
 - **Interactive Tables**: Search, filter, and sort by host, port, or severity.
