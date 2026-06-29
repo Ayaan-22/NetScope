@@ -11,9 +11,10 @@ services:
     environment:
       - NETSCOPE_LOG_LEVEL=INFO
       - NETSCOPE_CONCURRENCY=500
-      # - NETSCOPE_SHODAN_KEY=your_key_here
+      - NETSCOPE_AUTHORIZED_SCAN=false
+      - NETSCOPE_ALLOW_PUBLIC_TARGETS=false
     # Override CMD at runtime:
-    # docker compose run netscope -t 192.168.1.0/24 -p common
+    # docker compose run netscope -t 192.168.0.0/24 --discover-scan --no-nmap --authorize-scan
     network_mode: host             # Required for raw socket scanning
     cap_add:
       - NET_RAW                    # Required for Nmap SYN scan

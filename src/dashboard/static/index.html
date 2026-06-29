@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NetScope Dashboard</title>
+  <link rel="stylesheet" href="/assets/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">NS</div>
+        <div>
+          <h1>NetScope</h1>
+          <p id="version">Dashboard</p>
+        </div>
+      </div>
+
+      <form id="scan-form" class="scan-form">
+        <label>
+          <span>Target</span>
+          <input name="target" placeholder="192.168.0.0/24" autocomplete="off" required />
+        </label>
+
+        <div class="auto-network">
+          <button id="detect-network" class="secondary-action" type="button" title="Detect local network">
+            <span class="button-icon">@</span>
+            <span>Use My Network</span>
+          </button>
+          <select id="network-select" class="hidden" title="Detected local networks"></select>
+        </div>
+
+        <label>
+          <span>Ports</span>
+          <select name="ports">
+            <option value="common">Common</option>
+            <option value="top1000">Top 1000</option>
+            <option value="all">All TCP</option>
+            <option value="custom">Custom</option>
+          </select>
+        </label>
+
+        <label id="custom-ports-row" class="hidden">
+          <span>Custom ports</span>
+          <input name="custom_ports" placeholder="22,80,443,8000-8090" autocomplete="off" />
+        </label>
+
+        <div class="split">
+          <label>
+            <span>Timeout</span>
+            <input name="timeout" type="number" value="1.5" min="0.1" max="30" step="0.1" />
+          </label>
+          <label>
+            <span>Concurrency</span>
+            <input name="concurrency" type="number" value="500" min="1" max="5000" />
+          </label>
+        </div>
+
+        <div class="split">
+          <label>
+            <span>Batch</span>
+            <input name="batch_size" type="number" value="20" min="1" max="512" />
+          </label>
+          <label>
+            <span>Nmap</span>
+            <select name="use_nmap">
+              <option value="true">On</option>
+              <option value="false">Off</option>
+            </select>
+          </label>
+        </div>
+
+        <label>
+          <span>Exclude</span>
+          <input name="exclude" placeholder="192.168.0.1, 192.168.0.50" autocomplete="off" />
+        </label>
+
+        <div class="toggles">
+          <label><input name="discover_first" type="checkbox" /> Discover first</label>
+          <label><input name="authorize_scan" type="checkbox" /> Authorized</label>
+          <label><input name="allow_public_targets" type="checkbox" /> Public targets</label>
+        </div>
+
+        <button class="primary-action" type="submit">
+          <span class="button-icon">+</span>
+          <span>Start Scan</span>
+        </button>
+      </form>
+
+      <div class="jobs-panel">
+        <div class="panel-title">
+          <h2>Jobs</h2>
+          <button id="refresh-jobs" class="icon-button" type="button" title="Refresh jobs">R</button>
+        </div>
+        <div id="jobs-list" class="jobs-list"></div>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <section class="topbar">
+        <div>
+          <p class="eyebrow">Network exposure</p>
+          <h2 id="report-title">Report Console</h2>
+        </div>
+        <div class="top-actions">
+          <select id="report-select" title="Select report"></select>
+          <a id="open-html" class="ghost-action disabled" href="#" target="_blank" title="Open HTML report">HTML</a>
+          <a id="download-json" class="ghost-action disabled" href="#" download>JSON</a>
+        </div>
+      </section>
+
+      <section class="metric-grid">
+        <div class="metric">
+          <span>Hosts</span>
+          <strong id="metric-hosts">0</strong>
+          <small id="metric-hosts-sub">0 targeted</small>
+        </div>
+        <div class="metric">
+          <span>Open Ports</span>
+          <strong id="metric-ports">0</strong>
+          <small id="metric-services">0 services</small>
+        </div>
+        <div class="metric">
+          <span>Vulnerabilities</span>
+          <strong id="metric-vulns">0</strong>
+          <small id="metric-cves">0 unique CVEs</small>
+        </div>
+        <div class="metric danger">
+          <span>High-Risk Hosts</span>
+          <strong id="metric-risk">0</strong>
+          <small id="metric-critical">0 critical CVEs</small>
+        </div>
+      </section>
+
+      <section class="analysis-grid">
+        <div class="chart-panel">
+          <div class="panel-title">
+            <h2>Severity</h2>
+            <span id="severity-total">0 findings</span>
+          </div>
+          <canvas id="severity-chart" width="360" height="240"></canvas>
+          <div id="severity-legend" class="legend"></div>
+        </div>
+
+        <div class="chart-panel">
+          <div class="panel-title">
+            <h2>Services</h2>
+            <span id="service-total">0 rows</span>
+          </div>
+          <canvas id="service-chart" width="520" height="240"></canvas>
+        </div>
+
+        <div class="chart-panel">
+          <div class="panel-title">
+            <h2>Risk Bands</h2>
+            <span id="risk-total">0 ports</span>
+          </div>
+          <canvas id="risk-chart" width="520" height="240"></canvas>
+        </div>
+      </section>
+
+      <section class="results-section">
+        <div class="results-toolbar">
+          <div>
+            <h2>Results</h2>
+            <span id="result-count">0 rows</span>
+          </div>
+          <div class="filters">
+            <input id="search-input" type="search" placeholder="Search host, service, banner, CVE" />
+            <select id="severity-filter">
+              <option value="all">All severity</option>
+              <option value="critical">Critical</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+              <option value="none">No CVE</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th data-sort="host">Host</th>
+                <th data-sort="port">Port</th>
+                <th data-sort="service">Service</th>
+                <th data-sort="version">Version</th>
+                <th data-sort="risk_score">Risk</th>
+                <th>Evidence</th>
+                <th>CVEs</th>
+              </tr>
+            </thead>
+            <tbody id="results-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <aside class="detail-panel">
+      <div class="panel-title">
+        <h2>Evidence</h2>
+        <button id="clear-detail" class="icon-button" type="button" title="Clear evidence">X</button>
+      </div>
+      <div id="detail-content" class="detail-content">
+        <p class="empty">Select a result row.</p>
+      </div>
+    </aside>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

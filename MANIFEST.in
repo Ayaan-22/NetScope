@@ -1,0 +1,8 @@
+include README.md LICENSE CHANGELOG.md SECURITY.md CONTRIBUTING.md
+include requirements.txt requirements-dev.txt
+recursive-include config *.csv *.example
+recursive-include docs *.md
+recursive-exclude reports *
+recursive-exclude logs *
+exclude config/settings.yaml
+exclude .env

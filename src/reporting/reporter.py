@@ -7,13 +7,29 @@ import csv
 import json
 import logging
 import html as html_lib
-from datetime import datetime
+import re
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from src.scanner.engine import ScanSummary, PortResult
 
 logger = logging.getLogger(__name__)
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _sanitize_text(value: str, limit: int | None = None) -> str:
+    """Remove control characters from untrusted banner/report text."""
+    cleaned = _CONTROL_CHARS.sub("", value)
+    return cleaned[:limit] if limit is not None else cleaned
+
+
+def _sanitize_csv_cell(value: str, limit: int | None = None) -> str:
+    cleaned = _sanitize_text(value, limit)
+    if cleaned.startswith(_CSV_FORMULA_PREFIXES):
+        return f"'{cleaned}"
+    return cleaned
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +76,9 @@ _HTML_TEMPLATE = """\
   .risk-med  {{ color: var(--med); }}
   .risk-low  {{ color: var(--low); }}
   .banner {{ font-family: monospace; font-size: .78rem; color: var(--muted); max-width: 280px; word-break: break-all; white-space: pre-wrap; }}
+  .controls {{ margin: 1rem 0 .75rem; display: flex; gap: .75rem; flex-wrap: wrap; }}
+  .controls input {{ background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: .5rem .65rem; min-width: 260px; }}
+  th.sortable {{ cursor: pointer; }}
   .vuln-list {{ list-style: none; }}
   .vuln-list li {{ margin-bottom: .3rem; font-size: .82rem; }}
   .none {{ color: var(--muted); font-size: .82rem; }}
@@ -80,19 +99,54 @@ _HTML_TEMPLATE = """\
 
 {high_risk_section}
 
+{metadata_section}
+
 <h2>Scan Results</h2>
-<table>
+<div class="controls">
+  <input id="result-search" type="search" placeholder="Search host, hostname, service, banner, CVE" oninput="filterRows()"/>
+</div>
+<table id="results-table">
 <thead><tr>
-  <th>Host</th><th>Port</th><th>Service</th><th>Version</th>
-  <th>Risk Score</th><th>Banner</th><th>Vulnerabilities</th>
+  <th class="sortable" onclick="sortTable(0)">Host</th>
+  <th class="sortable" onclick="sortTable(1)">Hostname</th>
+  <th class="sortable" onclick="sortTable(2)">MAC</th>
+  <th class="sortable" onclick="sortTable(3, true)">Port</th>
+  <th class="sortable" onclick="sortTable(4)">Service</th>
+  <th class="sortable" onclick="sortTable(5)">Version</th>
+  <th class="sortable" onclick="sortTable(6, true)">Risk Score</th>
+  <th>Banner</th><th>Vulnerabilities</th>
 </tr></thead>
 <tbody>
 {rows}
 </tbody>
 </table>
 <footer>NetScope | Scan started {scan_start} | ended {scan_end}</footer>
+<script src="{script_name}"></script>
 </body>
 </html>
+"""
+
+_REPORT_JS = """\
+function filterRows() {
+  const q = document.getElementById('result-search').value.toLowerCase();
+  for (const row of document.querySelectorAll('#results-table tbody tr')) {
+    row.style.display = row.dataset.search.includes(q) ? '' : 'none';
+  }
+}
+function sortTable(col, numeric = false) {
+  const tbody = document.querySelector('#results-table tbody');
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+  const asc = tbody.dataset.sortCol != col || tbody.dataset.sortDir === 'desc';
+  rows.sort((a, b) => {
+    const av = a.children[col].innerText.replace('/10', '').trim();
+    const bv = b.children[col].innerText.replace('/10', '').trim();
+    const cmp = numeric ? (parseFloat(av) || 0) - (parseFloat(bv) || 0) : av.localeCompare(bv);
+    return asc ? cmp : -cmp;
+  });
+  tbody.dataset.sortCol = col;
+  tbody.dataset.sortDir = asc ? 'asc' : 'desc';
+  rows.forEach(row => tbody.appendChild(row));
+}
 """
 
 
@@ -117,21 +171,44 @@ def _risk_class(score: float) -> str:
 
 def _build_row(r: PortResult) -> str:
     rc = _risk_class(r.risk_score)
-    vuln_items = "".join(
-        f'<li>{_severity_badge(v["severity"])} '
-        f'<strong>{html_lib.escape(v["cve_id"])}</strong> - '
-        f'{html_lib.escape(v["description"][:120])}</li>'
-        for v in r.vulnerabilities
-    )
+    vuln_items = ""
+    for v in r.vulnerabilities:
+        cve_id = html_lib.escape(v["cve_id"])
+        reference_url = v.get("reference_url", "")
+        if reference_url:
+            cve_html = f'<a href="{html_lib.escape(reference_url, quote=True)}">{cve_id}</a>'
+        else:
+            cve_html = f"<strong>{cve_id}</strong>"
+        confidence = v.get("match_confidence", "unknown")
+        vuln_items += (
+            f'<li>{_severity_badge(v["severity"])} '
+            f"{cve_html} - {html_lib.escape(v['description'][:120])} "
+            f'<span class="none">({html_lib.escape(confidence)})</span></li>'
+        )
     vuln_cell = (
         f'<ul class="vuln-list">{vuln_items}</ul>'
         if vuln_items
         else '<span class="none">-</span>'
     )
     banner_display = html_lib.escape(r.banner[:160]) + ("..." if len(r.banner) > 160 else "")
+    search_text = " ".join(
+        [
+            r.host,
+            r.hostname,
+            r.mac_address,
+            str(r.port),
+            r.service,
+            r.version,
+            r.banner,
+            " ".join(v.get("cve_id", "") for v in r.vulnerabilities),
+            " ".join(v.get("severity", "") for v in r.vulnerabilities),
+        ]
+    ).lower()
     return (
-        f"<tr>"
+        f'<tr data-search="{html_lib.escape(search_text, quote=True)}">'
         f"<td>{html_lib.escape(r.host)}</td>"
+        f"<td>{html_lib.escape(r.hostname)}</td>"
+        f"<td>{html_lib.escape(r.mac_address)}</td>"
         f"<td><strong>{r.port}</strong></td>"
         f"<td>{html_lib.escape(r.service)}</td>"
         f"<td>{html_lib.escape(r.version)}</td>"
@@ -157,22 +234,37 @@ def generate_html(summary: ScanSummary, output_path: str = "reports/report.html"
     else:
         high_risk_section = ""
 
+    metadata_rows = "".join(
+        f"<tr><td>{html_lib.escape(str(key))}</td>"
+        f"<td>{html_lib.escape(str(value))}</td></tr>"
+        for key, value in sorted(summary.metadata.items())
+        if value
+    )
+    metadata_section = (
+        f"<h2>Scan Metadata</h2><table><tbody>{metadata_rows}</tbody></table>"
+        if metadata_rows
+        else ""
+    )
+
     html = _HTML_TEMPLATE.format(
-        timestamp=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         target=html_lib.escape(summary.target),
         hosts_scanned=summary.hosts_scanned,
         open_ports=summary.open_ports,
         total_vulns=summary.total_vulns,
         high_risk_count=len(summary.high_risk_hosts),
         high_risk_section=high_risk_section,
+        metadata_section=metadata_section,
         scan_start=html_lib.escape(summary.scan_start),
         scan_end=html_lib.escape(summary.scan_end),
+        script_name=html_lib.escape(Path(output_path).with_suffix(".js").name),
         rows=rows,
     )
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     Path(output_path).write_text(html, encoding="utf-8")
-    logger.info("HTML report → %s", output_path)
+    Path(output_path).with_suffix(".js").write_text(_REPORT_JS, encoding="utf-8")
+    logger.info("HTML report -> %s", output_path)
     return output_path
 
 
@@ -181,24 +273,33 @@ def generate_html(summary: ScanSummary, output_path: str = "reports/report.html"
 # ---------------------------------------------------------------------------
 
 def generate_json(summary: ScanSummary, output_path: str = "reports/report.json") -> str:
+    results = []
+    for result in summary.results:
+        item = result.to_dict()
+        item["banner"] = _sanitize_text(item.get("banner", ""))
+        results.append(item)
+
     data = {
         "meta": {
             "target": summary.target,
+            "hosts_targeted": summary.hosts_targeted,
+            "hosts_with_results": summary.hosts_with_results,
             "hosts_scanned": summary.hosts_scanned,
             "open_ports": summary.open_ports,
             "total_vulnerabilities": summary.total_vulns,
             "high_risk_hosts": summary.high_risk_hosts,
             "scan_start": summary.scan_start,
             "scan_end": summary.scan_end,
-            "generated": datetime.utcnow().isoformat(),
+            "generated": datetime.now(timezone.utc).isoformat(),
+            **summary.metadata,
         },
-        "results": [r.to_dict() for r in summary.results],
+        "results": results,
     }
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     Path(output_path).write_text(
         json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    logger.info("JSON report → %s", output_path)
+    logger.info("JSON report -> %s", output_path)
     return output_path
 
 
@@ -211,17 +312,23 @@ def generate_csv(summary: ScanSummary, output_path: str = "reports/report.csv") 
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(
-            ["Host", "Port", "Protocol", "State", "Service", "Version",
-             "Risk Score", "CVE Count", "CVE IDs", "Banner"]
+            ["Host", "Hostname", "MAC Address", "Port", "Protocol", "State", "Service", "Version",
+             "Risk Score", "CVE Count", "CVE IDs", "CVE References",
+             "Match Confidence", "Banner"]
         )
         for r in summary.results:
             cve_ids = "; ".join(v["cve_id"] for v in r.vulnerabilities)
+            cve_refs = "; ".join(v.get("reference_url", "") for v in r.vulnerabilities)
+            confidence = "; ".join(v.get("match_confidence", "") for v in r.vulnerabilities)
             writer.writerow(
-                [r.host, r.port, r.protocol, r.state, r.service, r.version,
+                [_sanitize_csv_cell(r.host), _sanitize_csv_cell(r.hostname),
+                 _sanitize_csv_cell(r.mac_address), r.port, r.protocol, r.state,
+                 _sanitize_csv_cell(r.service), _sanitize_csv_cell(r.version),
                  f"{r.risk_score:.1f}", len(r.vulnerabilities), cve_ids,
-                 r.banner[:200]]
+                 cve_refs, confidence,
+                 _sanitize_csv_cell(r.banner, 200)]
             )
-    logger.info("CSV report → %s", output_path)
+    logger.info("CSV report -> %s", output_path)
     return output_path
 
 
@@ -233,7 +340,7 @@ def export_all(
     summary: ScanSummary,
     output_dir: str = "reports",
     prefix: str = "netscope",
-    formats: Optional[list] = None,
+    formats: list | None = None,
 ) -> dict:
     """Export to all requested formats. Returns dict of {format: path}."""
     if formats is None:
@@ -249,5 +356,5 @@ def export_all(
         elif fmt == "csv":
             out["csv"] = generate_csv(summary, path)
         else:
-            logger.warning("Unknown report format '%s' — skipped.", fmt)
+            logger.warning("Unknown report format '%s' - skipped.", fmt)
     return out

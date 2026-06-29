@@ -27,22 +27,34 @@ Phase 4 — CVSS integration:
           falls back to severity-weight table for rows that predate the column.
 """
 
+import csv
 import asyncio
+import concurrent.futures
+import ipaddress
+import logging
 import math
 import platform
-import socket
-import subprocess
+import random
 import re
-import csv
-import logging
-import ipaddress
-import concurrent.futures
+import shutil
+import socket
+import subprocess  # nosec B404
+import ssl
+import sys
+import uuid
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from datetime import datetime, timezone
 from pathlib import Path
-from datetime import datetime
+from typing import Any
+
+from src import __version__
 
 logger = logging.getLogger(__name__)
+
+TLS_PORTS = {443, 465, 563, 636, 853, 989, 990, 993, 995, 8443, 9443}
+HTTP_PROBE_PORTS = {80, 8000, 8008, 8080, 8081, 8888}
+_JITTER_RANDOM = random.SystemRandom()
+_DEFAULT_CVE_DB_PATH = Path("config/cve_db.csv")
 
 
 # ---------------------------------------------------------------------------
@@ -53,24 +65,32 @@ logger = logging.getLogger(__name__)
 class PortResult:
     host: str
     port: int
+    hostname: str = "Unknown"
+    mac_address: str = "Unknown"
     protocol: str = "tcp"
     state: str = "closed"
     service: str = "unknown"
     version: str = "unknown"
     banner: str = ""
-    vulnerabilities: List[Dict] = field(default_factory=list)
+    tls_info: dict[str, Any] = field(default_factory=dict)
+    vulnerabilities: list[dict[str, Any]] = field(default_factory=list)
     risk_score: float = 0.0
-    scan_time: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    scan_time: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "host": self.host,
+            "hostname": self.hostname,
+            "mac_address": self.mac_address,
             "port": self.port,
             "protocol": self.protocol,
             "state": self.state,
             "service": self.service,
             "version": self.version,
             "banner": self.banner,
+            "tls_info": self.tls_info,
             "vulnerabilities": self.vulnerabilities,
             "risk_score": self.risk_score,
             "scan_time": self.scan_time,
@@ -90,10 +110,11 @@ class ScanSummary:
     hosts_with_results: int
     open_ports: int
     total_vulns: int
-    high_risk_hosts: List[str]
+    high_risk_hosts: list[str]
     scan_start: str
     scan_end: str
-    results: List[PortResult]
+    results: list[PortResult]
+    metadata: dict[str, str] = field(default_factory=dict)
 
     @property
     def hosts_scanned(self) -> int:
@@ -105,7 +126,7 @@ class ScanSummary:
 # Input validation
 # ---------------------------------------------------------------------------
 
-def validate_target(target: str) -> List[str]:
+def validate_target(target: str) -> list[str]:
     """
     Validate and expand a target (IP, CIDR, hostname) into a list of IP strings.
     Raises ValueError on invalid input.
@@ -114,7 +135,7 @@ def validate_target(target: str) -> List[str]:
     if not target:
         raise ValueError("Target cannot be empty.")
 
-    hosts: List[str] = []
+    hosts: list[str] = []
 
     # CIDR notation
     if "/" in target:
@@ -135,11 +156,13 @@ def validate_target(target: str) -> List[str]:
             ipaddress.ip_address(target)
             hosts = [target]
         except ValueError:
+            if re.fullmatch(r"\d+(?:\.\d+){3}", target):
+                raise ValueError(f"Invalid IP address '{target}'.") from None
             # Hostname — resolve it
             try:
                 resolved = socket.getaddrinfo(target, None, socket.AF_INET)
-                hosts = list({r[4][0] for r in resolved})
-                logger.info("Resolved %s → %s", target, hosts)
+                hosts = list({str(r[4][0]) for r in resolved})
+                logger.info("Resolved %s -> %s", target, hosts)
             except socket.gaierror as exc:
                 raise ValueError(f"Cannot resolve hostname '{target}': {exc}") from exc
 
@@ -148,23 +171,23 @@ def validate_target(target: str) -> List[str]:
     return hosts
 
 
-def validate_ports(ports_spec: str) -> List[int]:
+def validate_ports(ports_spec: str) -> list[int]:
     """
     Parse a port specification string into a list of integers.
     Supports: "80", "80,443", "1-1024", "22,80,8000-8080"
     """
-    ports: List[int] = []
+    ports: list[int] = []
     for part in ports_spec.split(","):
         part = part.strip()
         if "-" in part:
             try:
-                start, end = part.split("-", 1)
-                start, end = int(start), int(end)
+                start_raw, end_raw = part.split("-", 1)
+                start, end = int(start_raw), int(end_raw)
                 if not (1 <= start <= 65535 and 1 <= end <= 65535 and start <= end):
                     raise ValueError
                 ports.extend(range(start, end + 1))
             except ValueError:
-                raise ValueError(f"Invalid port range: '{part}'")
+                raise ValueError(f"Invalid port range: '{part}'") from None
         else:
             try:
                 port = int(part)
@@ -172,7 +195,7 @@ def validate_ports(ports_spec: str) -> List[int]:
                     raise ValueError
                 ports.append(port)
             except ValueError:
-                raise ValueError(f"Invalid port number: '{part}'")
+                raise ValueError(f"Invalid port number: '{part}'") from None
     return sorted(set(ports))
 
 
@@ -180,7 +203,7 @@ def validate_ports(ports_spec: str) -> List[int]:
 # Service identification
 # ---------------------------------------------------------------------------
 
-_PORT_SERVICE_MAP: Dict[int, str] = {
+_PORT_SERVICE_MAP: dict[int, str] = {
     21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp",
     53: "dns", 80: "http", 110: "pop3", 111: "rpcbind",
     135: "msrpc", 139: "netbios-ssn", 143: "imap",
@@ -191,7 +214,7 @@ _PORT_SERVICE_MAP: Dict[int, str] = {
     8443: "https-alt", 27017: "mongodb",
 }
 
-_BANNER_PATTERNS: List[Tuple[str, str]] = [
+_BANNER_PATTERNS: list[tuple[str, str]] = [
     (r"SSH-[\d.]+-", "ssh"),
     (r"^220.*FTP", "ftp"),
     (r"^220.*SMTP|^220.*mail", "smtp"),
@@ -200,7 +223,7 @@ _BANNER_PATTERNS: List[Tuple[str, str]] = [
     (r"^\* OK.*IMAP", "imap"),
     (r"MySQL|MariaDB", "mysql"),
     (r"RFB \d+\.\d+", "vnc"),
-    (r"^\-ERR|^\+OK", "redis"),
+    (r"^\-ERR", "redis"),
 ]
 
 
@@ -226,6 +249,61 @@ def parse_version(banner: str) -> str:
     return "unknown"
 
 
+def _version_matches(expected: str, detected: str) -> bool:
+    """
+    Match simple CVE DB version tokens on numeric boundaries.
+
+    This keeps legacy CSV entries such as "7.2" useful for "OpenSSH_7.2p1"
+    while avoiding substring false positives like "5.5" matching "15.50".
+    """
+    expected = expected.strip()
+    detected = detected.strip()
+    if expected == "*":
+        return detected != "unknown"
+    if not expected or detected == "unknown":
+        return False
+    pattern = rf"(?<!\d){re.escape(expected)}(?!\d)"
+    return re.search(pattern, detected) is not None
+
+
+def _is_probably_tls_port(port: int) -> bool:
+    return port in TLS_PORTS
+
+
+async def _probe_tls_banner(host: str, port: int, timeout: float) -> str:
+    """Attempt a TLS handshake and return concise TLS evidence."""
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    reader: asyncio.StreamReader | None = None
+    writer: asyncio.StreamWriter | None = None
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port, ssl=context, server_hostname=host),
+            timeout=timeout,
+        )
+        if writer is None:
+            return ""
+        ssl_obj = writer.get_extra_info("ssl_object")
+        if ssl_obj is None:
+            return ""
+        cipher = ssl_obj.cipher()
+        cipher_name = cipher[0] if cipher else "unknown"
+        version = ssl_obj.version() or "unknown"
+        return f"TLS {version}; cipher={cipher_name}"
+    except (OSError, ssl.SSLError, asyncio.TimeoutError):
+        return ""
+    finally:
+        if writer is not None:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except OSError:
+                pass
+        if reader is not None:
+            del reader
+
+
 # ---------------------------------------------------------------------------
 # Async port scanner
 # ---------------------------------------------------------------------------
@@ -235,12 +313,18 @@ async def _check_port(
     port: int,
     timeout: float,
     semaphore: asyncio.Semaphore,
-) -> Optional[Tuple[str, int, str]]:
+    probe_delay: float = 0.0,
+    probe_jitter: float = 0.0,
+) -> tuple[str, int, str] | None:
     """
     Asynchronously check a single TCP port.
     Returns (host, port, banner) if open, else None.
     """
     async with semaphore:
+        if probe_delay > 0 or probe_jitter > 0:
+            delay = probe_delay + _JITTER_RANDOM.uniform(0, max(probe_jitter, 0.0))
+            await asyncio.sleep(delay)
+
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port),
@@ -256,13 +340,22 @@ async def _check_port(
             data = await asyncio.wait_for(reader.read(1024), timeout=2.0)
             banner = data.decode(errors="replace").strip()
         except ConnectionResetError:
-            # If the server resets the connection immediately after handshake,
-            # it is effectively closed/filtered.
+            # The peer rejected the established connection before sending data;
+            # there is no open service result to report.
             return None
         except (asyncio.TimeoutError, OSError):
             pass
 
-        if not banner:
+        if not banner and _is_probably_tls_port(port):
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except OSError:
+                pass
+            banner = await _probe_tls_banner(host, port, timeout)
+            return host, port, banner
+
+        if not banner and port in HTTP_PROBE_PORTS:
             # FIX BUG-2: HTTP probe now sends the actual host, not the literal
             # string "target". Virtualhost-based servers (most modern HTTP servers)
             # route requests by the Host header; "target" always returns 404 or a
@@ -287,13 +380,19 @@ async def _check_port(
 
 async def scan_host_async(
     host: str,
-    ports: List[int],
+    ports: list[int],
     timeout: float = 1.5,
     concurrency: int = 200,
-) -> List[Tuple[str, int, str]]:
+    semaphore: asyncio.Semaphore | None = None,
+    probe_delay: float = 0.0,
+    probe_jitter: float = 0.0,
+) -> list[tuple[str, int, str]]:
     """Scan all ports on a single host concurrently."""
-    semaphore = asyncio.Semaphore(concurrency)
-    tasks = [_check_port(host, port, timeout, semaphore) for port in ports]
+    port_semaphore = semaphore or asyncio.Semaphore(concurrency)
+    tasks = [
+        _check_port(host, port, timeout, port_semaphore, probe_delay, probe_jitter)
+        for port in ports
+    ]
     results = await asyncio.gather(*tasks)
     return [r for r in results if r is not None]
 
@@ -311,9 +410,11 @@ NMAP_CHUNK_SIZE = 100
 
 def _try_nmap_scan(
     host: str,
-    ports: List[int],
+    ports: list[int],
     timing: int = 4,
-) -> Dict[int, Dict]:
+    os_detect: bool = False,
+    timeout: int = 120,
+) -> dict[int, dict[str, Any]]:
     """
     Run an Nmap service/version scan on specific open ports.
     Returns a dict keyed by port with service metadata.
@@ -323,14 +424,16 @@ def _try_nmap_scan(
     silently dropping all ports beyond the first 100.
     """
     try:
-        import nmap  # type: ignore
+        import nmap
     except ImportError:
         logger.debug("python-nmap not installed; skipping Nmap enrichment.")
         return {}
 
-    enriched: Dict[int, Dict] = {}
+    enriched: dict[int, dict[str, Any]] = {}
     nm = nmap.PortScanner()
-    args = f"-sV -T{timing} --version-intensity 5 -O --script=banner"
+    args = f"-sV -T{timing} --version-intensity 5 --script=banner"
+    if os_detect:
+        args += " -O"
 
     # Chunk the port list so we never silently drop ports
     for chunk_start in range(0, len(ports), NMAP_CHUNK_SIZE):
@@ -338,9 +441,9 @@ def _try_nmap_scan(
         port_str = ",".join(str(p) for p in chunk)
 
         try:
-            nm.scan(host, ports=port_str, arguments=args, timeout=120)
+            nm.scan(host, ports=port_str, arguments=args, timeout=timeout)
         except Exception as exc:
-            logger.warning("Nmap scan failed for %s (ports %s…): %s",
+            logger.warning("Nmap scan failed for %s (ports %s...): %s",
                            host, chunk[0], exc)
             continue  # try remaining chunks even if one fails
 
@@ -360,13 +463,13 @@ def _try_nmap_scan(
     return enriched
 
 
-def _try_nmap_discovery(target: str) -> set:
+def _try_nmap_discovery(target: str, timeout: int = 15) -> set:
     """
     Run a fast Nmap ping sweep (-sn) to discover active hosts.
     Returns a set of discovered IP addresses.
     """
     try:
-        import nmap  # type: ignore
+        import nmap
     except ImportError:
         return set()
 
@@ -375,7 +478,7 @@ def _try_nmap_discovery(target: str) -> set:
         # -sn: Ping Scan - disable port scan
         # -PE: ICMP echo, -PS80,443: TCP SYN discovery, -PA22,80,443: TCP ACK discovery
         # nmap ping discovery is much more advanced than our simple sweep.
-        nm.scan(hosts=target, arguments="-sn --host-timeout 5s")
+        nm.scan(hosts=target, arguments="-sn --host-timeout 5s", timeout=timeout)
         return set(nm.all_hosts())
     except Exception as exc:
         logger.debug("Nmap discovery failed: %s", exc)
@@ -395,7 +498,7 @@ def _try_nmap_discovery(target: str) -> set:
 # canonical CVE-DB service name to the set of detected service names that
 # should inherit its entries.  Matches are exact (set membership), not
 # substring, so false positives are eliminated.
-_SERVICE_FAMILY_MAP: Dict[str, set] = {
+_SERVICE_FAMILY_MAP: dict[str, set[str]] = {
     "http":       {"http", "http-proxy", "http-alt"},
     "https":      {"https", "https-alt"},
     "ssh":        {"ssh"},
@@ -416,7 +519,7 @@ _SERVICE_FAMILY_MAP: Dict[str, set] = {
 }
 
 # Reverse index: detected-service → set of CVE-DB keys to query
-_DETECTED_TO_CVE_KEYS: Dict[str, set] = {}
+_DETECTED_TO_CVE_KEYS: dict[str, set[str]] = {}
 for _cve_key, _detected_set in _SERVICE_FAMILY_MAP.items():
     for _det in _detected_set:
         _DETECTED_TO_CVE_KEYS.setdefault(_det, set()).add(_cve_key)
@@ -425,12 +528,33 @@ for _cve_key, _detected_set in _SERVICE_FAMILY_MAP.items():
 class CveDatabase:
     """Load and query a local CVE CSV database."""
 
-    def __init__(self, db_path: str = "config/cve_db.csv"):
-        self._db: Dict[str, List[Dict]] = {}
+    def __init__(self, db_path: str = str(_DEFAULT_CVE_DB_PATH)):
+        self._db: dict[str, list[dict[str, Any]]] = {}
         self._load(db_path)
 
+    @staticmethod
+    def _resolve_path(path: str) -> Path:
+        requested = Path(path).expanduser()
+        if requested.exists():
+            return requested
+
+        if requested != _DEFAULT_CVE_DB_PATH:
+            return requested
+
+        repo_root = Path(__file__).resolve().parents[2]
+        candidates = (
+            repo_root / _DEFAULT_CVE_DB_PATH,
+            Path(sys.prefix) / _DEFAULT_CVE_DB_PATH,
+            Path(sys.base_prefix) / _DEFAULT_CVE_DB_PATH,
+        )
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+        return requested
+
     def _load(self, path: str) -> None:
-        p = Path(path)
+        p = self._resolve_path(path)
         if not p.exists():
             logger.warning("CVE database not found at '%s'. CVE matching disabled.", path)
             return
@@ -467,14 +591,15 @@ class CveDatabase:
                         }
                     )
             logger.info(
-                "Loaded CVE DB: %d services, %d entries",
+                "Loaded CVE DB: %d services, %d entries from %s",
                 len(self._db),
                 sum(len(v) for v in self._db.values()),
+                p,
             )
         except Exception as exc:
             logger.error("Failed to load CVE database: %s", exc)
 
-    def match(self, service: str, version: str) -> List[Dict]:
+    def match(self, service: str, version: str) -> list[dict[str, Any]]:
         """
         Return matching CVEs for a service/version pair.
 
@@ -484,8 +609,8 @@ class CveDatabase:
         not every key that happens to contain "http" as a substring.
         """
         service = service.lower()
-        matches: List[Dict] = []
-        seen: set = set()
+        matches: list[dict[str, Any]] = []
+        seen: set[str] = set()
 
         # Build the set of CVE-DB keys to query for this detected service
         candidate_keys: set = _DETECTED_TO_CVE_KEYS.get(service, set())
@@ -494,13 +619,17 @@ class CveDatabase:
 
         for key in candidate_keys:
             for entry in self._db.get(key, []):
-                if entry["version"] == "*" or (
-                    version != "unknown" and entry["version"] in version
-                ):
+                if _version_matches(entry["version"], version):
                     uid = entry["cve_id"]
                     if uid not in seen:
                         seen.add(uid)
-                        matches.append(entry)
+                        matched = entry.copy()
+                        matched["reference_url"] = f"https://nvd.nist.gov/vuln/detail/{uid}"
+                        matched["match_confidence"] = (
+                            "service-wildcard" if entry["version"] == "*" else "version-boundary"
+                        )
+                        matched["evidence_version"] = version
+                        matches.append(matched)
         return matches
 
 
@@ -522,7 +651,7 @@ _SEVERITY_WEIGHTS = {
 }
 
 
-def calculate_risk_score(vulns: List[Dict]) -> float:
+def calculate_risk_score(vulns: list[dict[str, Any]]) -> float:
     """
     Compute a 0–10 risk score for a list of CVE matches on a single open port.
 
@@ -551,7 +680,7 @@ def calculate_risk_score(vulns: List[Dict]) -> float:
     if not vulns:
         return 0.0
 
-    scores: List[float] = []
+    scores: list[float] = []
     for v in vulns:
         cvss = v.get("cvss_score")
         if cvss is not None:
@@ -585,12 +714,12 @@ def _read_arp_cache_sync(host: str) -> str:
     try:
         if platform.system() == "Windows":
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            out = subprocess.check_output(
+            out = subprocess.check_output(  # nosec
                 ["arp", "-a", host], timeout=2,
                 creationflags=flags,
             ).decode(errors="ignore")
         else:
-            out = subprocess.check_output(
+            out = subprocess.check_output(  # nosec
                 ["arp", "-n", host], timeout=2,
             ).decode(errors="ignore")
     except Exception:
@@ -607,7 +736,7 @@ def _read_arp_cache_sync(host: str) -> str:
     return "Unknown"
 
 
-def _read_arp_cache_all_sync() -> List[Tuple[str, str]]:
+def _read_arp_cache_all_sync() -> list[tuple[str, str]]:
     """
     Read the full ARP table synchronously.  Returns list of (ip, mac) pairs.
     Intended to run in a thread executor.
@@ -615,15 +744,17 @@ def _read_arp_cache_all_sync() -> List[Tuple[str, str]]:
     try:
         if platform.system() == "Windows":
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            out = subprocess.check_output(
+            out = subprocess.check_output(  # nosec
                 ["arp", "-a"], timeout=2, creationflags=flags,
             ).decode(errors="ignore")
         else:
-            out = subprocess.check_output(["arp", "-n"], timeout=2).decode(errors="ignore")
+            out = subprocess.check_output(  # nosec
+                ["arp", "-n"], timeout=2
+            ).decode(errors="ignore")
     except Exception:
         return []
 
-    entries: List[Tuple[str, str]] = []
+    entries: list[tuple[str, str]] = []
     for line in out.splitlines():
         parts = line.split()
         if len(parts) >= 2:
@@ -632,9 +763,143 @@ def _read_arp_cache_all_sync() -> List[Tuple[str, str]]:
             # on Windows/Linux ARP output.
             if "." not in ip_raw and ":" not in ip_raw:
                 continue
-            mac = parts[1].replace("-", ":")
-            entries.append((ip_raw, mac))
+            mac = "Unknown"
+            for part in parts[1:]:
+                normalised = part.replace("-", ":")
+                if len(normalised.split(":")) == 6:
+                    mac = normalised
+                    break
+            if mac != "Unknown":
+                entries.append((ip_raw, mac))
     return entries
+
+
+_PING_NAME_RE = re.compile(r"Pinging\s+([^\s\[]+)\s+\[", re.IGNORECASE)
+_NETBIOS_NAME_RE = re.compile(
+    r"^\s*([^\s<]+)\s+<([0-9a-f]{2})>.*(?:UNIQUE|<ACTIVE>)",
+    re.IGNORECASE,
+)
+
+
+def _clean_hostname(value: str, host: str) -> str:
+    """Normalize a discovered host name and reject obvious non-names."""
+    name = value.strip().strip(".")
+    if not name or name.lower() in {"unknown", host.lower()}:
+        return "Unknown"
+    try:
+        ipaddress.ip_address(name)
+        return "Unknown"
+    except ValueError:
+        return name
+
+
+def _run_lookup_command(command: list[str], timeout: float = 1.5) -> str:
+    """Run a local name lookup command with a short timeout."""
+    try:
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        return subprocess.check_output(  # nosec
+            command,
+            timeout=timeout,
+            stderr=subprocess.DEVNULL,
+            creationflags=flags,
+        ).decode(errors="ignore")
+    except Exception:
+        return ""
+
+
+def _hostname_from_ping_output(output: str, host: str) -> str:
+    match = _PING_NAME_RE.search(output)
+    if not match:
+        return "Unknown"
+    return _clean_hostname(match.group(1), host)
+
+
+def _hostname_from_netbios_output(output: str, host: str) -> str:
+    """
+    Extract a workstation/server NetBIOS name from nbtstat/nmblookup output.
+
+    NetBIOS name suffix 00 is the workstation service, and 20 is the file
+    server service. Both are stronger identity signals than group names.
+    """
+    fallback = "Unknown"
+    for line in output.splitlines():
+        upper = line.upper()
+        if "<GROUP>" in upper or "GROUP" in upper:
+            continue
+        match = _NETBIOS_NAME_RE.match(line)
+        if not match:
+            continue
+        name = _clean_hostname(match.group(1), host)
+        if name == "Unknown":
+            continue
+        suffix = match.group(2).lower()
+        if suffix in {"00", "20"}:
+            return name
+        fallback = name
+    return fallback
+
+
+def _lookup_reverse_dns_hostname_sync(host: str) -> str:
+    try:
+        host_entry = socket.gethostbyaddr(host)
+        return _clean_hostname(host_entry[0], host)
+    except Exception:
+        return "Unknown"
+
+
+def _lookup_ping_hostname_sync(host: str) -> str:
+    if platform.system() != "Windows":
+        return "Unknown"
+    output = _run_lookup_command(["ping", "-a", "-n", "1", "-w", "1000", host])
+    return _hostname_from_ping_output(output, host)
+
+
+def _lookup_netbios_hostname_sync(host: str) -> str:
+    if platform.system() == "Windows":
+        output = _run_lookup_command(["nbtstat", "-A", host], timeout=2.0)
+        return _hostname_from_netbios_output(output, host)
+
+    if shutil.which("nmblookup"):
+        output = _run_lookup_command(["nmblookup", "-A", host], timeout=2.0)
+        return _hostname_from_netbios_output(output, host)
+
+    return "Unknown"
+
+
+def _lookup_mdns_hostname_sync(host: str) -> str:
+    if shutil.which("avahi-resolve-address"):
+        output = _run_lookup_command(["avahi-resolve-address", host], timeout=1.5)
+        parts = output.split()
+        if len(parts) >= 2:
+            return _clean_hostname(parts[1], host)
+
+    if shutil.which("getent"):
+        output = _run_lookup_command(["getent", "hosts", host], timeout=1.5)
+        parts = output.split()
+        if len(parts) >= 2:
+            return _clean_hostname(parts[1], host)
+
+    return "Unknown"
+
+
+def _resolve_hostname_sync(host: str) -> str:
+    """
+    Resolve hostnames through layered LAN-friendly sources.
+
+    Reverse DNS is tried first, but many home/office LANs do not maintain PTR
+    records. NetBIOS is the useful Windows fallback; mDNS/getent covers common
+    Unix desktop networks when those tools are installed.
+    """
+    for resolver in (
+        _lookup_reverse_dns_hostname_sync,
+        _lookup_ping_hostname_sync,
+        _lookup_netbios_hostname_sync,
+        _lookup_mdns_hostname_sync,
+    ):
+        hostname = resolver(host)
+        if hostname != "Unknown":
+            return hostname
+    return "Unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -650,12 +915,20 @@ class NetScopeScanner:
     def __init__(
         self,
         target: str,
-        ports: List[int],
+        ports: list[int],
         timeout: float = 1.5,
         concurrency: int = 500,
         use_nmap: bool = True,
         nmap_timing: int = 4,
+        nmap_os_detect: bool = False,
+        nmap_timeout: int = 120,
+        nmap_discovery_timeout: int = 15,
         cve_db_path: str = "config/cve_db.csv",
+        excluded_hosts: list[str] | None = None,
+        probe_delay: float = 0.0,
+        probe_jitter: float = 0.0,
+        max_results: int = 100000,
+        scan_metadata: dict[str, str] | None = None,
         # DESIGN-4 FIX: host_batch_size was a hard-coded magic number (20) buried
         # inside run().  It is now a first-class constructor parameter so it can be
         # set via ScanConfig / CLI --batch-size without touching source code.
@@ -663,26 +936,40 @@ class NetScopeScanner:
     ):
         self.target = target
         self.hosts = validate_target(target)
+        if excluded_hosts:
+            excluded = set(excluded_hosts)
+            self.hosts = [host for host in self.hosts if host not in excluded]
+        if not self.hosts:
+            raise ValueError("No hosts remain after applying exclusions.")
         self.ports = ports
         self.timeout = timeout
         self.concurrency = concurrency
         self.use_nmap = use_nmap
         self.nmap_timing = nmap_timing
+        self.nmap_os_detect = nmap_os_detect
+        self.nmap_timeout = nmap_timeout
+        self.nmap_discovery_timeout = nmap_discovery_timeout
         self.host_batch_size = host_batch_size
+        self.probe_delay = max(probe_delay, 0.0)
+        self.probe_jitter = max(probe_jitter, 0.0)
+        self.max_results = max(max_results, 1)
+        self.scan_metadata = scan_metadata or {}
         self.cve_db = CveDatabase(cve_db_path)
-        self._results: List[PortResult] = []
-        self._scan_start: Optional[str] = None
-        self._scan_end: Optional[str] = None
+        self._results: list[PortResult] = []
+        self._scan_start: str | None = None
+        self._scan_end: str | None = None
+        self._port_semaphore: asyncio.Semaphore | None = None
 
         # BUG-6 FIX: Single shared executor created at init time and reused
         # across all hosts.  Shut down via close() or context-manager protocol.
         self._executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix="netscope-nmap"
+            max_workers=max(8, min(32, host_batch_size * 2)),
+            thread_name_prefix="netscope-worker",
         )
 
         # DESIGN-1 FIX: Cache hostname/MAC lookups so each host is resolved
         # at most once even when called from both discovery and scan paths.
-        self._host_info_cache: Dict[str, Tuple[str, str]] = {}
+        self._host_info_cache: dict[str, tuple[str, str]] = {}
 
         logger.info(
             "Scanner initialised. Hosts: %d, Ports: %d, Concurrency: %d, Batch: %d",
@@ -707,19 +994,23 @@ class NetScopeScanner:
     # ------------------------------------------------------------------
 
     def _enrich_with_nmap(
-        self, host: str, open_ports: List[int]
-    ) -> Dict[int, Dict]:
+        self, host: str, open_ports: list[int]
+    ) -> dict[int, dict[str, Any]]:
         if not self.use_nmap or not open_ports:
             return {}
         logger.debug("Running Nmap enrichment on %s ports %s", host, open_ports)
-        return _try_nmap_scan(host, open_ports, self.nmap_timing)
+        return _try_nmap_scan(
+            host, open_ports, self.nmap_timing, self.nmap_os_detect, self.nmap_timeout
+        )
 
     def _build_port_result(
         self,
         host: str,
         port: int,
         banner: str,
-        nmap_info: Optional[Dict] = None,
+        nmap_info: dict[str, Any] | None = None,
+        hostname: str = "Unknown",
+        mac_address: str = "Unknown",
     ) -> PortResult:
         service = identify_service(port, banner)
         version = parse_version(banner)
@@ -736,6 +1027,8 @@ class NetScopeScanner:
         return PortResult(
             host=host,
             port=port,
+            hostname=hostname,
+            mac_address=mac_address,
             state="open",
             service=service,
             version=version,
@@ -748,7 +1041,7 @@ class NetScopeScanner:
     # Host info gathering  (cached + async-safe)
     # ------------------------------------------------------------------
 
-    async def _get_host_info_async(self, host: str) -> Tuple[str, str]:
+    async def _get_host_info_async(self, host: str) -> tuple[str, str]:
         """
         Resolve hostname and MAC address, using a cache so each host is
         looked up at most once.  The blocking ARP call runs in the shared
@@ -757,21 +1050,25 @@ class NetScopeScanner:
         if host in self._host_info_cache:
             return self._host_info_cache[host]
 
-        # Reverse-DNS lookup — socket.gethostbyaddr is blocking but fast
         loop = asyncio.get_running_loop()  # FIX BUG-1 (applied here too)
         hostname = "Unknown"
-        try:
-            hostname = await loop.run_in_executor(
-                self._executor, socket.gethostbyaddr, host
-            )
-            hostname = hostname[0]
-        except Exception:
-            pass
-
-        # ARP lookup — blocking subprocess, run in executor
-        mac_addr = await loop.run_in_executor(
+        hostname_future = loop.run_in_executor(
+            self._executor, _resolve_hostname_sync, host
+        )
+        mac_future = loop.run_in_executor(
             self._executor, _read_arp_cache_sync, host
         )
+
+        try:
+            hostname = await asyncio.wait_for(hostname_future, timeout=4.0)
+        except Exception as exc:
+            logger.debug("Hostname lookup failed for %s: %s", host, exc)
+
+        try:
+            mac_addr = await asyncio.wait_for(mac_future, timeout=3.0)
+        except Exception as exc:
+            logger.debug("ARP lookup failed for %s: %s", host, exc)
+            mac_addr = "Unknown"
 
         result = (hostname, mac_addr)
         self._host_info_cache[host] = result
@@ -781,15 +1078,21 @@ class NetScopeScanner:
     # Scan a single host
     # ------------------------------------------------------------------
 
-    async def _scan_single_host(self, host: str) -> List[PortResult]:
-        logger.info("Scanning host %s …", host)
+    async def _scan_single_host(self, host: str) -> list[PortResult]:
+        logger.info("Scanning host %s ...", host)
 
         hostname, mac_addr = await self._get_host_info_async(host)
         logger.info("  [i] Hostname : %s", hostname)
         logger.info("  [i] MAC Addr : %s", mac_addr)
 
         open_ports_raw = await scan_host_async(
-            host, self.ports, self.timeout, self.concurrency
+            host,
+            self.ports,
+            self.timeout,
+            self.concurrency,
+            semaphore=self._port_semaphore,
+            probe_delay=self.probe_delay,
+            probe_jitter=self.probe_jitter,
         )
 
         if not open_ports_raw:
@@ -800,7 +1103,7 @@ class NetScopeScanner:
         banners = {p: b for _, p, b in open_ports_raw}
 
         # Optional Nmap enrichment — runs in the shared executor (BUG-6 FIX)
-        nmap_data: Dict[int, Dict] = {}
+        nmap_data: dict[int, dict[str, Any]] = {}
         if self.use_nmap:
             # FIX BUG-1: use get_running_loop(), not get_event_loop()
             loop = asyncio.get_running_loop()
@@ -808,10 +1111,15 @@ class NetScopeScanner:
                 self._executor, self._enrich_with_nmap, host, open_port_nums
             )
 
-        results: List[PortResult] = []
+        results: list[PortResult] = []
         for port in open_port_nums:
             pr = self._build_port_result(
-                host, port, banners.get(port, ""), nmap_data.get(port)
+                host,
+                port,
+                banners.get(port, ""),
+                nmap_data.get(port),
+                hostname=hostname,
+                mac_address=mac_addr,
             )
             results.append(pr)
             logger.info(
@@ -827,18 +1135,27 @@ class NetScopeScanner:
 
     async def run(self) -> ScanSummary:
         """Execute the full scan and return a ScanSummary."""
-        self._scan_start = datetime.utcnow().isoformat()
-        all_results: List[PortResult] = []
+        self._scan_start = datetime.now(timezone.utc).isoformat()
+        all_results: list[PortResult] = []
+        self._port_semaphore = asyncio.Semaphore(self.concurrency)
 
-        # Scan hosts concurrently in polite batches (DESIGN-4: configurable batch size)
-        for i in range(0, len(self.hosts), self.host_batch_size):
-            batch = self.hosts[i : i + self.host_batch_size]
-            tasks = [self._scan_single_host(h) for h in batch]
-            batched = await asyncio.gather(*tasks)
-            for host_results in batched:
-                all_results.extend(host_results)
+        try:
+            # Scan hosts concurrently in polite batches (DESIGN-4: configurable batch size)
+            for i in range(0, len(self.hosts), self.host_batch_size):
+                batch = self.hosts[i : i + self.host_batch_size]
+                tasks = [self._scan_single_host(h) for h in batch]
+                batched = await asyncio.gather(*tasks)
+                for host_results in batched:
+                    all_results.extend(host_results)
+                    if len(all_results) > self.max_results:
+                        raise RuntimeError(
+                            f"Scan result limit exceeded ({self.max_results}). "
+                            "Narrow the target, exclude hosts, or raise max_results."
+                        )
+        finally:
+            self._port_semaphore = None
 
-        self._scan_end = datetime.utcnow().isoformat()
+        self._scan_end = datetime.now(timezone.utc).isoformat()
         self._results = all_results
 
         high_risk = list(
@@ -859,13 +1176,19 @@ class NetScopeScanner:
             scan_start=self._scan_start,
             scan_end=self._scan_end,
             results=all_results,
+            metadata={
+                "session_id": str(uuid.uuid4()),
+                "tool_version": __version__,
+                "scanner_host": socket.gethostname(),
+                **self.scan_metadata,
+            },
         )
 
     # ------------------------------------------------------------------
     # Discovery mode
     # ------------------------------------------------------------------
 
-    async def _ping_host(self, host: str, semaphore: asyncio.Semaphore) -> Optional[str]:
+    async def _ping_host(self, host: str, semaphore: asyncio.Semaphore) -> str | None:
         """
         Async ICMP ping using a subprocess.  platform/subprocess are now
         module-level imports so they are not re-imported on every coroutine
@@ -887,11 +1210,11 @@ class NetScopeScanner:
                 await proc.wait()
                 if proc.returncode == 0:
                     return host
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Ping failed for %s: %s", host, exc)
             return None
 
-    async def _nudge_host(self, host: str, semaphore: asyncio.Semaphore) -> Optional[str]:
+    async def _nudge_host(self, host: str, semaphore: asyncio.Semaphore) -> str | None:
         """
         Force the OS to perform an ARP request by attempting a sub-second
         TCP connection to common ports.
@@ -930,52 +1253,11 @@ class NetScopeScanner:
         loop is never blocked.
         """
         print("\n" + "=" * 60)
-        print(f"  HOST DISCOVERY")
+        print("  HOST DISCOVERY")
         print(f"  Target : {self.target}")
         print("=" * 60)
 
-        logger.info("Sweeping %d hosts with ICMP + TCP nudges...", len(self.hosts))
-        semaphore = asyncio.Semaphore(min(self.concurrency, 200))
-
-        # Run both ICMP pings and TCP nudges in parallel to maximize speed
-        # while forcing the ARP cache to populate.
-        ping_tasks = [self._ping_host(h, semaphore) for h in self.hosts]
-        nudge_tasks = [self._nudge_host(h, semaphore) for h in self.hosts]
-
-        # Gather all results
-        results = await asyncio.gather(*(ping_tasks + nudge_tasks))
-        active_hosts: set = {h for h in results if h is not None}
-
-        loop = asyncio.get_running_loop()
-
-        # Nmap Discovery Booster (if available)
-        # Nmap's ARP scan and advanced ping discovery are much more effective
-        # on local networks than custom TCP nudges.
-        if self.use_nmap:
-            logger.info("Boosting discovery with Nmap ping sweep...")
-            nmap_hosts = await loop.run_in_executor(
-                self._executor, _try_nmap_discovery, self.target
-            )
-            active_hosts.update(nmap_hosts)
-
-        # FIX BUG-3: ARP cache fallback now runs in the executor, not inline
-        arp_entries = await loop.run_in_executor(
-            self._executor, _read_arp_cache_all_sync
-        )
-
-        hosts_set = set(self.hosts)
-        for ip, mac in arp_entries:
-            if (
-                ip in hosts_set
-                and mac not in ("ff:ff:ff:ff:ff:ff", "ff-ff-ff-ff-ff-ff")
-            ):
-                active_hosts.add(ip)
-
-        # Sort IP addresses properly
-        active_hosts_list = sorted(
-            active_hosts,
-            key=lambda ip: [int(x) for x in ip.split(".")],
-        )
+        active_hosts_list = await self.discover_hosts()
 
         print("\n  Active Hosts:")
         print(f"  {'IP Address':<18} {'MAC Address':<20} {'Hostname'}")
@@ -989,3 +1271,38 @@ class NetScopeScanner:
         print(f"  Discovery complete. Found {len(active_hosts_list)} active hosts.")
         print("=" * 60 + "\n")
         return 0
+
+    async def discover_hosts(self) -> list[str]:
+        """Discover active hosts without printing the discovery table."""
+        logger.info("Sweeping %d hosts with ICMP + TCP nudges...", len(self.hosts))
+        semaphore = asyncio.Semaphore(min(self.concurrency, 200))
+
+        ping_tasks = [self._ping_host(h, semaphore) for h in self.hosts]
+        nudge_tasks = [self._nudge_host(h, semaphore) for h in self.hosts]
+        results = await asyncio.gather(*(ping_tasks + nudge_tasks))
+        active_hosts: set = {h for h in results if h is not None}
+
+        loop = asyncio.get_running_loop()
+        if self.use_nmap:
+            logger.info("Boosting discovery with Nmap ping sweep...")
+            nmap_hosts = await loop.run_in_executor(
+                self._executor,
+                _try_nmap_discovery,
+                self.target,
+                self.nmap_discovery_timeout,
+            )
+            active_hosts.update(nmap_hosts)
+
+        arp_entries = await loop.run_in_executor(
+            self._executor, _read_arp_cache_all_sync
+        )
+
+        hosts_set = set(self.hosts)
+        for ip, mac in arp_entries:
+            if (
+                ip in hosts_set
+                and mac not in ("ff:ff:ff:ff:ff:ff", "ff-ff-ff-ff-ff-ff")
+            ):
+                active_hosts.add(ip)
+
+        return sorted(active_hosts, key=lambda ip: [int(x) for x in ip.split(".")])

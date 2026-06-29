@@ -56,7 +56,7 @@ def setup_logging(
     ch.setLevel(numeric_level)
     ch.setFormatter(
         _ColourFormatter(
-            fmt="%(asctime)s %(levelname)s %(name)s — %(message)s",
+            fmt="%(asctime)s %(levelname)s %(name)s - %(message)s",
             datefmt="%H:%M:%S",
         )
     )
@@ -73,7 +73,7 @@ def setup_logging(
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(
         logging.Formatter(
-            fmt="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
+            fmt="%(asctime)s %(levelname)-8s %(name)s - %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
     )

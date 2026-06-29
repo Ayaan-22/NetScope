@@ -11,11 +11,11 @@ Phase 2 — Design fixes applied here:
             to NetScopeScanner via main.py.
 """
 
-import os
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -24,20 +24,20 @@ logger = logging.getLogger(__name__)
 # Common port sets
 # ---------------------------------------------------------------------------
 
-COMMON_PORTS: List[int] = [
+COMMON_PORTS: list[int] = [
     21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143,
     443, 445, 587, 993, 995, 1723, 3306, 3389, 5432,
     5900, 6379, 8080, 8443, 27017,
 ]
 
-TOP_1000_PORTS: List[int] = list(range(1, 1025)) + [
+TOP_1000_PORTS: list[int] = list(range(1, 1025)) + [
     1433, 1521, 1723, 2049, 2181, 3000, 3306, 3389,
     4444, 4848, 5432, 5900, 6379, 6443, 7001, 8000,
     8008, 8080, 8081, 8443, 8888, 9000, 9090, 9200,
     9300, 10000, 27017, 27018, 28017,
 ]
 
-ALL_PORTS: List[int] = list(range(1, 65536))
+ALL_PORTS: list[int] = list(range(1, 65536))
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +48,7 @@ ALL_PORTS: List[int] = list(range(1, 65536))
 class ScanConfig:
     # Target
     target: str = ""
-    ports: List[int] = field(default_factory=lambda: COMMON_PORTS.copy())
+    ports: list[int] | str = field(default_factory=lambda: COMMON_PORTS.copy())
 
     # Timing
     timeout: float = 1.5
@@ -56,10 +56,21 @@ class ScanConfig:
     # DESIGN-4: host_batch_size is now explicit in the config schema.
     # Previously it was a magic number 20 buried in NetScopeScanner.run().
     host_batch_size: int = 20
+    probe_delay: float = 0.0
+    probe_jitter: float = 0.0
+    max_results: int = 100000
 
     # Nmap
     use_nmap: bool = True
     nmap_timing: int = 4
+    nmap_os_detect: bool = False
+    nmap_timeout: int = 120
+    nmap_discovery_timeout: int = 15
+
+    # Safety
+    allow_public_targets: bool = False
+    authorized_scan: bool = False
+    exclude_hosts: list[str] = field(default_factory=list)
 
     # CVE database
     cve_db_path: str = "config/cve_db.csv"
@@ -70,11 +81,18 @@ class ScanConfig:
     # Output
     output_dir: str = "reports"
     report_prefix: str = "netscope"
-    report_formats: List[str] = field(default_factory=lambda: ["html", "json", "csv"])
+    report_formats: list[str] = field(default_factory=lambda: ["html", "json", "csv"])
 
     # Logging
     log_level: str = "INFO"
     log_dir: str = "logs"
+
+    def __repr__(self) -> str:
+        values = self.__dict__.copy()
+        if values.get("shodan_api_key"):
+            values["shodan_api_key"] = "***"
+        fields = ", ".join(f"{key}={value!r}" for key, value in values.items())
+        return f"{self.__class__.__name__}({fields})"
 
     # ---------------------------------------------------------------------------
     # DESIGN-3 FIX: corrected load-order factory methods
@@ -111,19 +129,51 @@ class ScanConfig:
             logger.debug("Settings file '%s' not found; using defaults.", path)
             return self
         try:
-            import yaml  # type: ignore
+            import yaml
             with p.open() as f:
                 data = yaml.safe_load(f) or {}
             for key, val in data.items():
+                if key == "batch_size":
+                    logger.warning(
+                        "Config key 'batch_size' is deprecated; use 'host_batch_size'."
+                    )
+                    key = "host_batch_size"
                 if hasattr(self, key):
-                    setattr(self, key, val)
+                    setattr(self, key, self._coerce_value(key, val))
                 else:
-                    logger.debug("Unknown config key '%s' in '%s' — ignored.", key, path)
+                    logger.debug("Unknown config key '%s' in '%s' - ignored.", key, path)
         except ImportError:
             logger.warning("PyYAML not installed; ignoring '%s'.", path)
         except Exception as exc:
             logger.warning("Could not parse '%s': %s", path, exc)
         return self
+
+    def _coerce_value(self, key: str, value: Any) -> Any:
+        """Coerce YAML scalar values to the dataclass field's current type."""
+        if key == "ports":
+            if isinstance(value, list):
+                return [int(port) for port in value]
+            return str(value)
+
+        current = getattr(self, key)
+        if isinstance(current, bool):
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.strip().lower() not in ("0", "false", "no", "off")
+            return bool(value)
+        if isinstance(current, int) and not isinstance(current, bool):
+            return int(value)
+        if isinstance(current, float):
+            return float(value)
+        if isinstance(current, list):
+            if isinstance(value, list):
+                return value
+            if isinstance(value, str):
+                return [part.strip() for part in value.split(",") if part.strip()]
+        if isinstance(current, str):
+            return str(value)
+        return value
 
     def _apply_env(self) -> "ScanConfig":
         """
@@ -131,18 +181,48 @@ class ScanConfig:
         Only set env vars win; unset vars leave self unchanged.
         Returns self for chaining.
         """
-        def _get(key: str) -> Optional[str]:
+        def _get(key: str) -> str | None:
             return os.environ.get(key)
 
-        if (v := _get("NETSCOPE_TIMEOUT"))      is not None: self.timeout        = float(v)
-        if (v := _get("NETSCOPE_CONCURRENCY"))  is not None: self.concurrency    = int(v)
-        if (v := _get("NETSCOPE_BATCH_SIZE"))   is not None: self.host_batch_size = int(v)
-        if (v := _get("NETSCOPE_USE_NMAP"))     is not None: self.use_nmap       = v not in ("0", "false", "no")
-        if (v := _get("NETSCOPE_NMAP_TIMING"))  is not None: self.nmap_timing    = int(v)
-        if (v := _get("NETSCOPE_CVE_DB"))       is not None: self.cve_db_path    = v
-        if (v := _get("NETSCOPE_SHODAN_KEY"))   is not None: self.shodan_api_key = v
-        if (v := _get("NETSCOPE_OUTPUT_DIR"))   is not None: self.output_dir     = v
-        if (v := _get("NETSCOPE_LOG_LEVEL"))    is not None: self.log_level      = v
+        def _as_bool(value: str) -> bool:
+            return value.strip().lower() not in ("0", "false", "no", "off")
+
+        if (v := _get("NETSCOPE_TIMEOUT")) is not None:
+            self.timeout = float(v)
+        if (v := _get("NETSCOPE_CONCURRENCY")) is not None:
+            self.concurrency = int(v)
+        if (v := _get("NETSCOPE_BATCH_SIZE")) is not None:
+            self.host_batch_size = int(v)
+        if (v := _get("NETSCOPE_PROBE_DELAY")) is not None:
+            self.probe_delay = float(v)
+        if (v := _get("NETSCOPE_PROBE_JITTER")) is not None:
+            self.probe_jitter = float(v)
+        if (v := _get("NETSCOPE_MAX_RESULTS")) is not None:
+            self.max_results = int(v)
+        if (v := _get("NETSCOPE_USE_NMAP")) is not None:
+            self.use_nmap = _as_bool(v)
+        if (v := _get("NETSCOPE_NMAP_TIMING")) is not None:
+            self.nmap_timing = int(v)
+        if (v := _get("NETSCOPE_NMAP_OS_DETECT")) is not None:
+            self.nmap_os_detect = _as_bool(v)
+        if (v := _get("NETSCOPE_NMAP_TIMEOUT")) is not None:
+            self.nmap_timeout = int(v)
+        if (v := _get("NETSCOPE_NMAP_DISCOVERY_TIMEOUT")) is not None:
+            self.nmap_discovery_timeout = int(v)
+        if (v := _get("NETSCOPE_ALLOW_PUBLIC_TARGETS")) is not None:
+            self.allow_public_targets = _as_bool(v)
+        if (v := _get("NETSCOPE_AUTHORIZED_SCAN")) is not None:
+            self.authorized_scan = _as_bool(v)
+        if (v := _get("NETSCOPE_EXCLUDE_HOSTS")) is not None:
+            self.exclude_hosts = [part.strip() for part in v.split(",") if part.strip()]
+        if (v := _get("NETSCOPE_CVE_DB")) is not None:
+            self.cve_db_path = v
+        if (v := _get("NETSCOPE_SHODAN_KEY")) is not None:
+            self.shodan_api_key = v
+        if (v := _get("NETSCOPE_OUTPUT_DIR")) is not None:
+            self.output_dir = v
+        if (v := _get("NETSCOPE_LOG_LEVEL")) is not None:
+            self.log_level = v
         return self
 
     # ------------------------------------------------------------------

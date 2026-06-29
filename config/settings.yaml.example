@@ -5,10 +5,16 @@
 timeout: 1.5            # Per-port TCP connection timeout (seconds)
 concurrency: 500        # Max simultaneous async connections
 host_batch_size: 20     # Hosts scanned in parallel per async batch
+probe_delay: 0.0        # Fixed delay before each probe; raise for polite WAN scans
+probe_jitter: 0.0       # Random additional delay before each probe
+max_results: 100000     # Abort if more than this many open-port rows accumulate
 
 # ── Nmap ──────────────────────────────────────────────────────────────────────
 use_nmap: true          # Enrich open ports with nmap service/version detection
+nmap_os_detect: false   # Enable nmap -O OS detection; usually requires root/CAP_NET_RAW
 nmap_timing: 4          # 0=paranoid … 5=insane (4=aggressive recommended)
+nmap_timeout: 120       # Per Nmap enrichment chunk timeout in seconds
+nmap_discovery_timeout: 15  # Nmap discovery booster timeout in seconds
 
 # ── CVE Database ──────────────────────────────────────────────────────────────
 cve_db_path: config/cve_db.csv
@@ -27,3 +33,8 @@ report_formats:
 # ── Logging ───────────────────────────────────────────────────────────────────
 log_level: INFO         # DEBUG | INFO | WARNING | ERROR
 log_dir: logs
+
+# ── Safety ────────────────────────────────────────────────────────────────────
+authorized_scan: false
+allow_public_targets: false
+exclude_hosts: []
