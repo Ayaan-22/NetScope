@@ -31,6 +31,11 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 REPORT_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 IPV4_RE = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3})")
 MAX_AUTO_NETWORK_ADDRESSES = 65536
+ReportFormat = Literal["html", "json", "csv"]
+
+
+def _default_report_formats() -> list[ReportFormat]:
+    return ["html", "json", "csv"]
 
 
 class ScanRequest(BaseModel):
@@ -49,9 +54,7 @@ class ScanRequest(BaseModel):
     authorize_scan: bool = False
     allow_public_targets: bool = False
     exclude: list[str] = Field(default_factory=list)
-    formats: list[Literal["html", "json", "csv"]] = Field(
-        default=["html", "json", "csv"]
-    )
+    formats: list[ReportFormat] = Field(default_factory=_default_report_formats)
 
     @field_validator("ports")
     @classmethod
