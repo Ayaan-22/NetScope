@@ -50,7 +50,7 @@ class ScanRequest(BaseModel):
     allow_public_targets: bool = False
     exclude: list[str] = Field(default_factory=list)
     formats: list[Literal["html", "json", "csv"]] = Field(
-        default_factory=lambda: ["html", "json", "csv"]
+        default=["html", "json", "csv"]
     )
 
     @field_validator("ports")
