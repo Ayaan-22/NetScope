@@ -153,8 +153,30 @@ class TestParseVersion:
 # =============================================================================
 
 class TestCalculateRiskScore:
+    @pytest.fixture()
+    def numeric_cvss_vulns(self):
+        return [
+            {"cve_id": "CVE-2026-0001", "severity": "Low", "cvss_score": 4.2},
+            {"cve_id": "CVE-2026-0002", "severity": "Medium", "cvss_score": 7.4},
+        ]
+
+    @pytest.fixture()
+    def mixed_cvss_and_legacy_vulns(self):
+        return [
+            {"cve_id": "CVE-2026-0003", "severity": "High", "cvss_score": 5.1},
+            {"cve_id": "CVE-LEGACY-0004", "severity": "Medium"},
+        ]
+
     def test_no_vulns(self):
         assert calculate_risk_score([]) == 0.0
+
+    def test_numeric_cvss_scores_are_used(self, numeric_cvss_vulns):
+        score = calculate_risk_score(numeric_cvss_vulns)
+        assert score == 7.75
+
+    def test_mixed_cvss_and_severity_only_entries(self, mixed_cvss_and_legacy_vulns):
+        score = calculate_risk_score(mixed_cvss_and_legacy_vulns)
+        assert score == 5.45
 
     def test_single_critical(self):
         score = calculate_risk_score([{"severity": "Critical"}])
@@ -306,6 +328,29 @@ def _make_summary() -> ScanSummary:
 
 
 class TestReports:
+    @pytest.fixture()
+    def cvss_scored_summary(self):
+        vulns = [
+            {
+                "cve_id": "CVE-2026-9999",
+                "description": "CVSS-scored OpenSSH issue",
+                "severity": "Low",
+                "cvss_score": 9.8,
+            }
+        ]
+        r = PortResult(
+            host="10.0.0.5", port=22, state="open",
+            service="ssh", version="9.1", banner="SSH-2.0-OpenSSH_9.1",
+            vulnerabilities=vulns,
+            risk_score=calculate_risk_score(vulns),
+        )
+        return ScanSummary(
+            target="10.0.0.5", hosts_targeted=1, hosts_with_results=1,
+            open_ports=1, total_vulns=1, high_risk_hosts=["10.0.0.5"],
+            scan_start="2024-01-01T00:00:00", scan_end="2024-01-01T00:01:00",
+            results=[r],
+        )
+
     def test_html_report(self, tmp_path):
         summary = _make_summary()
         out = str(tmp_path / "report.html")
@@ -333,6 +378,23 @@ class TestReports:
         assert len(rows) == 1
         assert rows[0]["Host"] == "10.0.0.1"
         assert rows[0]["Port"] == "22"
+
+    def test_report_outputs_preserve_cvss_scored_risk(self, tmp_path, cvss_scored_summary):
+        import json
+
+        html_path = generate_html(cvss_scored_summary, str(tmp_path / "cvss.html"))
+        json_path = generate_json(cvss_scored_summary, str(tmp_path / "cvss.json"))
+        csv_path = generate_csv(cvss_scored_summary, str(tmp_path / "cvss.csv"))
+
+        html_content = Path(html_path).read_text(encoding="utf-8")
+        json_data = json.loads(Path(json_path).read_text(encoding="utf-8"))
+        csv_rows = list(csv.DictReader(Path(csv_path).open(encoding="utf-8")))
+
+        assert cvss_scored_summary.results[0].risk_score == 9.8
+        assert "9.8/10" in html_content
+        assert json_data["results"][0]["risk_score"] == 9.8
+        assert json_data["results"][0]["vulnerabilities"][0]["cvss_score"] == 9.8
+        assert csv_rows[0]["Risk Score"] == "9.8"
 
     def test_html_xss_escaped(self, tmp_path):
         """Banner content must be HTML-escaped."""

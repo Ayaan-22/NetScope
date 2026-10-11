@@ -162,3 +162,7 @@ logs/
 reports/
 config/settings.yaml
 report_analysis/
+current-env.txt
+.tracecov/
+.tracecov-missing/
+.ruff_cache/
