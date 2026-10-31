@@ -3,213 +3,100 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NetScope Dashboard</title>
+  <meta name="color-scheme" content="dark light" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23252e4b'/%3E%3Ctext x='5' y='21' font-size='16' font-family='system-ui' font-weight='700' fill='%239aabff'%3ENS%3C/text%3E%3C/svg%3E" />
+  <title>NetScope · Network exposure</title>
+  <script>
+    try { document.documentElement.dataset.theme = localStorage.getItem('netscope-theme') || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'); } catch (_) {}
+  </script>
   <link rel="stylesheet" href="/assets/styles.css" />
 </head>
 <body>
+  <a class="skip-link" href="#results">Skip to results</a>
+  <svg class="svg-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16M8 4v6m8 4v6"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10" cy="10" r="6"/><path d="m15 15 6 6"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V4H4v12h4"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  </defs></svg>
+  <header class="topbar">
+    <a href="/" class="brand" aria-label="NetScope dashboard"><span class="brand-mark">NS</span><span class="brand-name">NetScope <small id="version">v2.1.0</small></span></a>
+    <div class="report-picker"><label class="sr-only" for="report-select">Scan history</label><select id="report-select"><option>Loading scan history…</option></select></div>
+    <span id="scan-status" class="scan-status" role="status" aria-live="polite">Connecting…</span>
+    <div class="header-actions">
+      <details id="export-menu" class="export-menu"><summary><svg><use href="#i-download"/></svg><span>Export</span></summary><div class="export-options"><a id="open-html" class="disabled" href="#" target="_blank" rel="noopener" aria-disabled="true">HTML report <span>↗</span></a><a id="download-json" class="disabled" href="#" download aria-disabled="true">JSON data <span>↓</span></a></div></details>
+      <button id="theme-toggle" class="icon-button" aria-label="Switch to light theme" title="Switch theme"><svg><use href="#i-sun"/></svg></button>
+    </div>
+  </header>
   <div class="app-shell">
-    <aside class="sidebar">
-      <div class="brand">
-        <div class="brand-mark">NS</div>
-        <div>
-          <h1>NetScope</h1>
-          <p id="version">Dashboard</p>
-        </div>
-      </div>
-
-      <form id="scan-form" class="scan-form">
-        <label>
-          <span>Target</span>
-          <input name="target" placeholder="192.168.0.0/24" autocomplete="off" required />
-        </label>
-
-        <div class="auto-network">
-          <button id="detect-network" class="secondary-action" type="button" title="Detect local network">
-            <span class="button-icon">@</span>
-            <span>Use My Network</span>
-          </button>
-          <select id="network-select" class="hidden" title="Detected local networks"></select>
-        </div>
-
-        <label>
-          <span>Ports</span>
-          <select name="ports">
-            <option value="common">Common</option>
-            <option value="top1000">Top 1000</option>
-            <option value="all">All TCP</option>
-            <option value="custom">Custom</option>
-          </select>
-        </label>
-
-        <label id="custom-ports-row" class="hidden">
-          <span>Custom ports</span>
-          <input name="custom_ports" placeholder="22,80,443,8000-8090" autocomplete="off" />
-        </label>
-
-        <div class="split">
-          <label>
-            <span>Timeout</span>
-            <input name="timeout" type="number" value="1.5" min="0.1" max="30" step="0.1" />
-          </label>
-          <label>
-            <span>Concurrency</span>
-            <input name="concurrency" type="number" value="500" min="1" max="5000" />
-          </label>
-        </div>
-
-        <div class="split">
-          <label>
-            <span>Batch</span>
-            <input name="batch_size" type="number" value="20" min="1" max="512" />
-          </label>
-          <label>
-            <span>Nmap</span>
-            <select name="use_nmap">
-              <option value="true">On</option>
-              <option value="false">Off</option>
-            </select>
-          </label>
-        </div>
-
-        <label>
-          <span>Exclude</span>
-          <input name="exclude" placeholder="192.168.0.1, 192.168.0.50" autocomplete="off" />
-        </label>
-
-        <div class="toggles">
-          <label><input name="discover_first" type="checkbox" /> Discover first</label>
-          <label><input name="authorize_scan" type="checkbox" /> Authorized</label>
-          <label><input name="allow_public_targets" type="checkbox" /> Public targets</label>
-        </div>
-
-        <button class="primary-action" type="submit">
-          <span class="button-icon">+</span>
-          <span>Start Scan</span>
-        </button>
+    <aside id="setup-panel" class="setup-panel" aria-labelledby="setup-title">
+      <div class="panel-title setup-heading"><div><span class="eyebrow">New assessment</span><h2 id="setup-title">Scan setup</h2></div><button id="close-setup" class="icon-button" aria-label="Collapse scan setup" title="Collapse scan setup"><svg><use href="#i-close"/></svg></button></div>
+      <form id="scan-form">
+        <fieldset><legend>Target</legend>
+          <div class="label-line"><label for="target">IP, CIDR or hostname</label><button id="detect-network" class="text-button" type="button">Use My Network</button></div>
+          <input id="target" name="target" class="mono" placeholder="192.168.0.0/24" autocomplete="off" aria-describedby="target-hint" required />
+          <p id="target-hint" class="helper" aria-live="polite">Enter a host or network to assess.</p>
+          <label class="sr-only" for="network-select">Detected local networks</label><select id="network-select" class="hidden"></select>
+          <label for="exclude">Exclude <span class="muted">(optional)</span></label><input id="exclude" name="exclude" class="mono" placeholder="192.168.0.1, 192.168.0.50" autocomplete="off" />
+          <p class="helper">Comma-separated addresses or networks.</p>
+        </fieldset>
+        <fieldset><legend>Scope &amp; safety</legend>
+          <label class="check-row"><input name="discover_first" type="checkbox"/><span>Discover first<small>Find active hosts before scanning ports.</small></span></label>
+          <label class="check-row"><input name="authorize_scan" type="checkbox"/><span>Authorized<small>I have permission to assess this target.</small></span></label>
+          <label class="check-row public-warning"><input name="allow_public_targets" type="checkbox"/><span>⚠ Public targets<small>Allows public IPs; authorization also required.</small></span></label>
+        </fieldset>
+        <details id="advanced-settings" class="advanced-settings"><summary><span>Advanced</span><span class="muted">Ports &amp; performance</span><svg><use href="#i-arrow"/></svg></summary><fieldset><legend class="sr-only">Performance settings</legend>
+          <label for="ports">Ports preset</label><select id="ports" name="ports"><option value="common">Common ports</option><option value="top1000">Top 1000</option><option value="all">All TCP ports</option><option value="custom">Custom</option></select>
+          <div id="custom-ports-row" class="hidden"><label for="custom-ports">Custom ports</label><input id="custom-ports" name="custom_ports" class="mono" placeholder="22,80,443,8000-8090" autocomplete="off" /></div>
+          <div class="split"><label>Timeout <span class="input-unit"><input name="timeout" type="number" value="1.5" min="0.1" max="30" step="0.1"/><span>s</span></span></label><label>Concurrency<input name="concurrency" type="number" value="500" min="1" max="5000"/></label></div>
+          <div class="split"><label>Host batch<input name="batch_size" type="number" value="20" min="1" max="512"/></label><label class="switch-label">Nmap enrichment<input name="use_nmap" type="checkbox" role="switch" checked/><span class="helper">Service &amp; version detection</span></label></div>
+        </fieldset></details>
+        <div class="scan-submit"><p id="scan-error" class="form-error hidden" role="alert"></p><button id="start-scan" class="primary-action" type="submit" disabled aria-describedby="scan-readiness"><svg><use href="#i-plus"/></svg>Start Scan</button><p id="scan-readiness" class="helper" role="status" aria-live="polite">Enter a valid target and tick Authorized.</p></div>
       </form>
-
-      <div class="jobs-panel">
-        <div class="panel-title">
-          <h2>Jobs</h2>
-          <button id="refresh-jobs" class="icon-button" type="button" title="Refresh jobs">R</button>
-        </div>
-        <div id="jobs-list" class="jobs-list"></div>
-      </div>
+      <section class="jobs-panel" aria-labelledby="jobs-title"><div class="panel-title"><h2 id="jobs-title">Jobs</h2><button id="refresh-jobs" class="quiet-button" type="button" title="Refresh jobs (R)"><svg><use href="#i-refresh"/></svg>Refresh <kbd>R</kbd></button></div><div id="jobs-list" class="jobs-list"><p class="muted">Loading jobs…</p></div></section>
     </aside>
-
-    <main class="workspace">
-      <section class="topbar">
-        <div>
-          <p class="eyebrow">Network exposure</p>
-          <h2 id="report-title">Report Console</h2>
-        </div>
-        <div class="top-actions">
-          <select id="report-select" title="Select report"></select>
-          <a id="open-html" class="ghost-action disabled" href="#" target="_blank" title="Open HTML report">HTML</a>
-          <a id="download-json" class="ghost-action disabled" href="#" download>JSON</a>
-        </div>
+    <main id="main" class="workspace">
+      <div id="offline-banner" class="offline-banner hidden" role="alert"><span>Dashboard API is offline. Showing the last loaded data.</span><button id="retry" class="quiet-button">Retry connection</button></div>
+      <section id="scan-activity" class="scan-activity hidden" aria-label="Active scan" role="status" aria-live="polite"></section>
+      <div class="workspace-heading"><div><p class="eyebrow">Network exposure</p><h1 id="report-title">Your network, in focus.</h1><p id="report-meta" class="muted">Local assessments · Evidence at a glance</p></div><button id="toggle-setup" class="quiet-button" aria-expanded="true" aria-controls="setup-panel"><svg><use href="#i-sliders"/></svg>Scan setup</button></div>
+      <section class="metric-grid" aria-label="Assessment summary">
+        <button class="metric" data-kpi="hosts" aria-pressed="false" title="Show one highest-risk port per host"><span>Hosts</span><strong id="metric-hosts">—</strong><small id="metric-hosts-sub">Hosts with open ports</small></button>
+        <button class="metric" data-kpi="ports" aria-pressed="false" title="Show all open ports"><span>Open Ports</span><strong id="metric-ports">—</strong><small id="metric-services">All detected services</small></button>
+        <button class="metric" data-kpi="vulns" aria-pressed="false" title="CVE matches are candidates requiring verification"><span>CVE matches</span><strong id="metric-vulns">—</strong><small id="metric-cves">Candidate findings</small></button>
+        <button class="metric" data-kpi="risk" aria-pressed="false" title="Hosts with report port scores at least 7.5; matches may be unverified"><span>High-risk candidates</span><strong id="metric-risk">—</strong><small id="metric-critical">Requires verification</small></button>
       </section>
-
-      <section class="metric-grid">
-        <div class="metric">
-          <span>Hosts</span>
-          <strong id="metric-hosts">0</strong>
-          <small id="metric-hosts-sub">0 targeted</small>
+      <p id="confidence-note" class="confidence-note hidden" role="status"></p>
+      <section id="results" class="results-section" aria-labelledby="results-title" tabindex="-1">
+        <div class="results-toolbar"><div class="results-heading"><h2 id="results-title">Exposure results</h2><span id="result-count" class="muted" role="status">Loading…</span></div><div class="result-actions"><button id="compact-toggle" class="quiet-button" aria-pressed="false" title="Use 40px rows instead of 44px">Compact</button><div class="search-wrap"><svg><use href="#i-search"/></svg><label class="sr-only" for="search-input">Search host, port, service, version, banner or CVE</label><input id="search-input" type="search" placeholder="Search hosts, services, CVEs…"/><kbd>/</kbd></div></div></div>
+        <div class="filter-toolbar"><span class="filter-label">CVE severity:</span><div id="severity-filters" class="filter-chips" role="group" aria-label="Filter by CVE severity"></div></div>
+        <div class="confidence-toolbar"><label title="Hide ports containing wildcard CVE matches from results, KPIs and charts. Saved reports and scores are unchanged."><input id="hide-unverified" type="checkbox"/>Hide unverified <span id="unverified-count" class="muted"></span></label><button id="clear-filters" class="text-button hidden">Clear filters</button></div>
+        <div id="active-filter" class="active-filter hidden"></div>
+        <div id="loading-state" class="skeletons" aria-label="Loading results"><div></div><div></div><div></div><div></div><div></div></div>
+        <p id="table-scroll-hint" class="table-scroll-hint hidden">Scroll horizontally for more columns →</p>
+        <div id="table-wrap" class="table-wrap hidden" role="region" aria-label="Exposure results table" tabindex="0">
+          <table><caption class="sr-only">Open network ports. Activate a host to inspect evidence. Risk bands use port scores; CVE badges use finding severity.</caption><colgroup><col class="host-col"/><col class="port-col"/><col class="service-col"/><col class="version-col"/><col class="risk-col"/><col class="evidence-col"/><col class="cve-col"/></colgroup><thead><tr>
+            <th scope="col" data-sort="host"><button>Host<span class="sort-icon"></span></button></th><th scope="col" data-sort="port"><button>Port<span class="sort-icon"></span></button></th><th scope="col" data-sort="service"><button>Service<span class="sort-icon"></span></button></th><th scope="col" data-sort="version"><button>Version<span class="sort-icon"></span></button></th><th scope="col" data-sort="risk_score" aria-sort="descending"><button title="Port score: Critical ≥9 · High ≥7.5 · Medium ≥5 · Low <5">Port risk<span class="sort-icon">↓</span></button></th><th scope="col" data-sort="banner"><button>Evidence<span class="sort-icon"></span></button></th><th scope="col" data-sort="cve"><button>CVE matches<span class="sort-icon"></span></button></th>
+          </tr></thead><tbody id="results-body"></tbody></table>
         </div>
-        <div class="metric">
-          <span>Open Ports</span>
-          <strong id="metric-ports">0</strong>
-          <small id="metric-services">0 services</small>
-        </div>
-        <div class="metric">
-          <span>Vulnerabilities</span>
-          <strong id="metric-vulns">0</strong>
-          <small id="metric-cves">0 unique CVEs</small>
-        </div>
-        <div class="metric danger">
-          <span>High-Risk Hosts</span>
-          <strong id="metric-risk">0</strong>
-          <small id="metric-critical">0 critical CVEs</small>
-        </div>
+        <div id="empty-state" class="empty-state hidden"><span class="empty-mark">NS</span><h3>No assessments yet</h3><p>Set up a local scan to see open ports and matched vulnerabilities here.</p><button id="empty-setup" class="quiet-button">Open scan setup <span>→</span></button></div>
+        <div id="no-matches" class="empty-state hidden"><h3>No matching ports</h3><p>Try a different search or clear the current filters.</p><button id="reset-search" class="quiet-button">Clear all filters</button></div>
+        <div id="pagination" class="pagination hidden"><label>Rows per page <select id="page-size"><option selected>50</option><option>25</option><option>100</option></select></label><span id="page-info" class="muted"></span><div><button id="prev-page" class="icon-button" aria-label="Previous page">←</button><button id="next-page" class="icon-button" aria-label="Next page">→</button></div></div>
       </section>
-
-      <section class="analysis-grid">
-        <div class="chart-panel">
-          <div class="panel-title">
-            <h2>Severity</h2>
-            <span id="severity-total">0 findings</span>
-          </div>
-          <canvas id="severity-chart" width="360" height="240"></canvas>
-          <div id="severity-legend" class="legend"></div>
-        </div>
-
-        <div class="chart-panel">
-          <div class="panel-title">
-            <h2>Services</h2>
-            <span id="service-total">0 rows</span>
-          </div>
-          <canvas id="service-chart" width="520" height="240"></canvas>
-        </div>
-
-        <div class="chart-panel">
-          <div class="panel-title">
-            <h2>Risk Bands</h2>
-            <span id="risk-total">0 ports</span>
-          </div>
-          <canvas id="risk-chart" width="520" height="240"></canvas>
-        </div>
-      </section>
-
-      <section class="results-section">
-        <div class="results-toolbar">
-          <div>
-            <h2>Results</h2>
-            <span id="result-count">0 rows</span>
-          </div>
-          <div class="filters">
-            <input id="search-input" type="search" placeholder="Search host, service, banner, CVE" />
-            <select id="severity-filter">
-              <option value="all">All severity</option>
-              <option value="critical">Critical</option>
-              <option value="high">High</option>
-              <option value="medium">Medium</option>
-              <option value="low">Low</option>
-              <option value="none">No CVE</option>
-            </select>
-          </div>
-        </div>
-
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th data-sort="host">Host</th>
-                <th data-sort="port">Port</th>
-                <th data-sort="service">Service</th>
-                <th data-sort="version">Version</th>
-                <th data-sort="risk_score">Risk</th>
-                <th>Evidence</th>
-                <th>CVEs</th>
-              </tr>
-            </thead>
-            <tbody id="results-body"></tbody>
-          </table>
-        </div>
-      </section>
+      <details id="analysis" class="analysis-section" open><summary><span>Assessment breakdown</span><small>Candidate matches · Severity and port score are separate measures</small><svg><use href="#i-arrow"/></svg></summary><div class="analysis-grid">
+        <section class="chart-panel" aria-labelledby="severity-title"><div class="panel-title"><h2 id="severity-title">CVE severity</h2><span id="severity-total" class="muted">0 matches</span></div><div id="severity-chart" class="bar-chart"></div><p id="severity-confidence" class="helper">CVE labels describe candidate matches, not confirmed vulnerabilities.</p></section>
+        <section class="chart-panel" aria-labelledby="services-title"><div class="panel-title"><h2 id="services-title">Services</h2><button id="show-services" class="text-button" aria-expanded="false">Show all</button></div><div id="service-chart" class="bar-chart"></div></section>
+        <section class="chart-panel" aria-labelledby="risk-title"><div class="panel-title"><h2 id="risk-title">Port risk score</h2><button class="info-button" aria-label="Port risk thresholds: Critical at least 9, High at least 7.5, Medium at least 5, Low below 5. Low includes unscored ports and does not mean safe. Nonzero bars have a minimum visual width." title="Critical ≥9 · High ≥7.5 · Medium ≥5 · Low <5, including unscored ports. Nonzero bars have a 12% minimum visual width; counts are exact.">?</button></div><div id="risk-chart" class="bar-chart"></div><p id="risk-confidence" class="helper">Report scores may include unverified matches. Low includes unscored ports; it does not mean safe.</p></section>
+      </div></details>
+      <footer class="workspace-footer"><span><span class="local-dot"></span>Local workspace</span><span>Scan data stays on this machine.</span></footer>
     </main>
-
-    <aside class="detail-panel">
-      <div class="panel-title">
-        <h2>Evidence</h2>
-        <button id="clear-detail" class="icon-button" type="button" title="Clear evidence">X</button>
-      </div>
-      <div id="detail-content" class="detail-content">
-        <p class="empty">Select a result row.</p>
-      </div>
-    </aside>
   </div>
-
-  <div id="toast" class="toast hidden"></div>
+  <dialog id="evidence-drawer" class="evidence-drawer" aria-labelledby="detail-title"><div class="drawer-heading"><div><span class="eyebrow">Port evidence</span><h2 id="detail-title" class="mono"></h2></div><button id="clear-detail" class="icon-button" aria-label="Close evidence (Escape)"><svg><use href="#i-close"/></svg></button></div><div class="drawer-navigation"><span id="detail-position" class="muted"></span><div><button id="prev-detail" class="quiet-button" aria-label="Previous result (Arrow Up)">↑ Previous</button><button id="next-detail" class="quiet-button" aria-label="Next result (Arrow Down)">↓ Next</button></div></div><div id="detail-content"></div></dialog>
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
   <script src="/assets/app.js"></script>
 </body>
 </html>
