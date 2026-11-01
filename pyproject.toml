@@ -41,8 +41,14 @@ dev = [
   "ruff>=0.5",
   "mypy>=1.10",
   "bandit>=1.7",
+]
+
+# Audit and hook tooling needs Python 3.11+ for patched filelock releases.
+# Keep it out of the Python 3.10 test/runtime environment.
+tools = [
   "pip-audit>=2.7",
   "pre-commit>=3.7",
+  "filelock>=4.2.1",
 ]
 
 [project.scripts]

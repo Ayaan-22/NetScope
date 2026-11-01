@@ -27,7 +27,7 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip setuptools wheel
           python -m pip install -e ".[dev]"
 
       - name: Lint
@@ -42,8 +42,30 @@ jobs:
       - name: Security scan
         run: bandit -q -r src main.py
 
+      - name: Record tested package environment
+        id: audit-target
+        run: |
+          python -m pip list --format=freeze --exclude netscope-scanner > "$RUNNER_TEMP/netscope-tested-requirements.txt"
+          echo "requirements=$RUNNER_TEMP/netscope-tested-requirements.txt" >> "$GITHUB_OUTPUT"
+
+      # Patched filelock (used by pip-audit/pre-commit) requires Python 3.11+.
+      # Audit the actual matrix environment, including Python 3.10 backports.
+      - name: Set up audit Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Dependency audit
-        run: pip-audit -r requirements.txt -r requirements-dev.txt
+        env:
+          AUDIT_TARGET: ${{ steps.audit-target.outputs.requirements }}
+        run: |
+          python -m venv "$RUNNER_TEMP/netscope-audit"
+          audit_python="$RUNNER_TEMP/netscope-audit/bin/python"
+          "$audit_python" -m pip install --upgrade pip setuptools wheel
+          "$audit_python" -m pip install -r requirements-tools.txt
+          "$audit_python" -m pip_audit --strict --disable-pip --no-deps -r "$AUDIT_TARGET"
+          audit_packages=$("$audit_python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+          "$audit_python" -m pip_audit --strict --path "$audit_packages"
 
   docker:
     name: Docker build

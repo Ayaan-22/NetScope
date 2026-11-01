@@ -1,0 +1,4 @@
+# Audit and hook tools require Python 3.11+ for patched filelock releases.
+pip-audit>=2.7
+pre-commit>=3.7
+filelock>=4.2.1

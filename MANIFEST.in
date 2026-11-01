@@ -1,5 +1,5 @@
 include README.md LICENSE CHANGELOG.md SECURITY.md CONTRIBUTING.md
-include requirements.txt requirements-dev.txt
+include requirements.txt requirements-dev.txt requirements-tools.txt
 recursive-include config *.csv *.example
 recursive-include docs *.md
 recursive-exclude reports *
