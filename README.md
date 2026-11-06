@@ -27,16 +27,16 @@ A production-grade, async network vulnerability scanner built in Python. Designe
 
 ## Features
 
-| Category         | Capability                                                                           |
-| ---------------- | ------------------------------------------------------------------------------------ |
-| **Scanning**     | High-performance Async TCP connect scan, configurable batching and concurrency       |
-| **Discovery**    | **High-Fidelity Engine**: ICMP sweep + **TCP Nudge** + Nmap ARP overlay              |
-| **Detection**    | Banner grabbing with dynamic HTTP Host probing, regex-based fingerprinting           |
-| **Intelligence** | **CVSS v3.1 Integration**: Local CVE database with authoritative NVD base scores     |
-| **Reporting**    | Interactive HTML, JSON, CSV, metadata, and JSON scan diffs                           |
-| **Dashboard**    | FastAPI web console with scan launch, local-network auto-detect, live jobs, charts   |
-| **Safety**       | CIDR limits (/16), public-target authorization, exclusions, sanitized output         |
-| **Ops**          | Rotating logs, YAML configuration, environment variable overrides                    |
+| Category               | Capability                                                                             |
+| ---------------------- | -------------------------------------------------------------------------------------- |
+| **Scanning**     | High-performance Async TCP connect scan, configurable batching and concurrency         |
+| **Discovery**    | **High-Fidelity Engine**: ICMP sweep + **TCP Nudge** + Nmap ARP overlay    |
+| **Detection**    | Banner grabbing with dynamic HTTP Host probing, regex-based fingerprinting             |
+| **Intelligence** | **CVSS v3.1 Integration**: Local CVE database with authoritative NVD base scores |
+| **Reporting**    | Interactive HTML, JSON, CSV, metadata, and JSON scan diffs                             |
+| **Dashboard**    | FastAPI web console with scan launch, local-network auto-detect, live jobs, charts     |
+| **Safety**       | CIDR limits (/16), public-target authorization, exclusions, sanitized output           |
+| **Ops**          | Rotating logs, YAML configuration, environment variable overrides                      |
 | **Testing**      | Unit and async integration test suite (`pytest`); check current coverage locally     |
 
 ---
@@ -50,28 +50,28 @@ graph TD
     A2 --> A3[Local Network Detection]
     B --> C[(YAML / Env Vars)]
     B --> D[(CVE Database)]
-    
+  
     A --> E[Scanner Engine]
-    
+  
     subgraph "Engine Core"
         E --> F[Host Discovery]
         F --> F1[ICMP Sweep]
         F --> F2[TCP Nudge]
         F --> F3[ARP Enrichment]
-        
+      
         E --> G[Port Scanner]
         G --> G1[Async TCP Connect]
         G --> G2[Nmap Service Discovery]
         G --> G3[Vulnerability Matching]
     end
-    
+  
     E --> H[Metrics & Summary]
     H --> I[Reporting Engine]
-    
+  
     I --> J[HTML Dark Mode]
     I --> K[JSON Output]
     I --> L[CSV Export]
-    
+  
     style E fill:#f96,stroke:#333,stroke-width:2px
     style F fill:#bbf,stroke:#333,stroke-width:1px
     style G fill:#bbf,stroke:#333,stroke-width:1px
@@ -232,27 +232,27 @@ usage: netscope [-h] [-t TARGET] [-p PORTS] [--discover] [--discover-scan] [--ti
 
 ### Argument Details
 
-| Flag            | Default         | Description                                              |
-| --------------- | --------------- | -------------------------------------------------------- |
-| `-t, --target`  | **Required**    | IP, hostname, or CIDR (e.g. `192.168.0.0/24`)            |
-| `--discover`    | `false`         | Host discovery only (ping sweep + ARP), no port scan     |
-| `--discover-scan` | `false`       | Discover active hosts first, then scan only those hosts  |
-| `-p, --ports`   | `common`        | `common`, `top1000`, `all`, or custom list (`22,80,443`) |
-| `--timeout`     | `1.5`           | Connection timeout in seconds                            |
-| `--concurrency` | `500`           | Max concurrent sockets (per host)                        |
-| `--batch-size`  | `20`            | Max hosts scanned in parallel (total batch)              |
-| `--probe-delay` | `0`             | Fixed delay before each TCP probe                        |
-| `--probe-jitter`| `0`             | Random additional delay before each TCP probe            |
-| `--max-results` | `100000`        | Abort if scan output exceeds this many open-port rows    |
-| `--no-nmap`     | `false`         | Skip Nmap service/version enrichment                     |
-| `--nmap-os-detect` | `false`      | Enable Nmap OS detection (`-O`); usually requires root/CAP_NET_RAW |
-| `--nmap-timeout` | `120`          | Timeout for each Nmap enrichment chunk                   |
-| `--nmap-discovery-timeout` | `15` | Timeout for the Nmap discovery booster                   |
-| `--exclude`     | _(none)_        | Exclude an IP, hostname, or CIDR; repeatable             |
-| `--diff`        | _(none)_        | Compare the new JSON report with a previous JSON report  |
-| `--authorize-scan` | `false`      | Acknowledge authorization for the target                 |
-| `--allow-public-targets` | `false` | Permit public targets; requires authorization            |
-| `--config`      | `settings.yaml` | Path to YAML config file                                 |
+| Flag                         | Default            | Description                                                          |
+| ---------------------------- | ------------------ | -------------------------------------------------------------------- |
+| `-t, --target`             | **Required** | IP, hostname, or CIDR (e.g. `192.168.0.0/24`)                      |
+| `--discover`               | `false`          | Host discovery only (ping sweep + ARP), no port scan                 |
+| `--discover-scan`          | `false`          | Discover active hosts first, then scan only those hosts              |
+| `-p, --ports`              | `common`         | `common`, `top1000`, `all`, or custom list (`22,80,443`)     |
+| `--timeout`                | `1.5`            | Connection timeout in seconds                                        |
+| `--concurrency`            | `500`            | Max concurrent sockets (per host)                                    |
+| `--batch-size`             | `20`             | Max hosts scanned in parallel (total batch)                          |
+| `--probe-delay`            | `0`              | Fixed delay before each TCP probe                                    |
+| `--probe-jitter`           | `0`              | Random additional delay before each TCP probe                        |
+| `--max-results`            | `100000`         | Abort if scan output exceeds this many open-port rows                |
+| `--no-nmap`                | `false`          | Skip Nmap service/version enrichment                                 |
+| `--nmap-os-detect`         | `false`          | Enable Nmap OS detection (`-O`); usually requires root/CAP_NET_RAW |
+| `--nmap-timeout`           | `120`            | Timeout for each Nmap enrichment chunk                               |
+| `--nmap-discovery-timeout` | `15`             | Timeout for the Nmap discovery booster                               |
+| `--exclude`                | _(none)_         | Exclude an IP, hostname, or CIDR; repeatable                         |
+| `--diff`                   | _(none)_         | Compare the new JSON report with a previous JSON report              |
+| `--authorize-scan`         | `false`          | Acknowledge authorization for the target                             |
+| `--allow-public-targets`   | `false`          | Permit public targets; requires authorization                        |
+| `--config`                 | `settings.yaml`  | Path to YAML config file                                             |
 
 ### Examples
 
@@ -316,19 +316,19 @@ The dashboard can detect the active private IPv4 network for you. Click **Use My
 
 If you prefer the CLI, these are common local/lab target patterns:
 
-| Adapter | Your host IP | Scan target |
-| ------- | ------------ | ----------- |
-| Wi-Fi | `192.168.0.106` | `192.168.0.0/24` |
-| Ethernet / host-only | `192.168.56.1` | `192.168.56.0/24` |
-| VMware VMnet1 | `192.168.145.1` | `192.168.145.0/24` |
-| VMware VMnet8 | `192.168.223.1` | `192.168.223.0/24` |
+| Adapter              | Your host IP      | Scan target          |
+| -------------------- | ----------------- | -------------------- |
+| Wi-Fi                | `192.168.0.106` | `192.168.0.0/24`   |
+| Ethernet / host-only | `192.168.56.1`  | `192.168.56.0/24`  |
+| VMware VMnet1        | `192.168.145.1` | `192.168.145.0/24` |
+| VMware VMnet8        | `192.168.223.1` | `192.168.223.0/24` |
 
 Start with the Wi-Fi target for your real LAN. Use VMware or host-only targets only when the VMs/lab machines you want to test are attached to those adapters.
 
 ### Port Specifications
 
-| Spec              | Meaning                       |
-| ----------------- | ----------------------------- |
+| Spec                | Meaning                       |
+| ------------------- | ----------------------------- |
 | `common`          | 25 well-known ports (default) |
 | `top1000`         | Top ~1000 ports (nmap-style)  |
 | `all`             | All 65,535 TCP ports          |
@@ -424,24 +424,24 @@ NetScope applies configuration in the following order (highest priority wins):
 
 All settings can be overridden via env vars (useful for Docker/CI):
 
-| Variable               | Default             | Description                    |
-| ---------------------- | ------------------- | ------------------------------ |
-| `NETSCOPE_TIMEOUT`     | `1.5`               | Per-port TCP timeout (seconds) |
-| `NETSCOPE_CONCURRENCY` | `500`               | Max async connections          |
-| `NETSCOPE_PROBE_DELAY` | `0`                 | Fixed delay before each probe  |
-| `NETSCOPE_PROBE_JITTER` | `0`                | Random additional probe delay  |
-| `NETSCOPE_MAX_RESULTS` | `100000`           | Open-port row safety ceiling   |
-| `NETSCOPE_USE_NMAP`    | `1`                 | Set to `0` to disable Nmap     |
-| `NETSCOPE_NMAP_TIMING` | `4`                 | Nmap timing template (0–5)     |
-| `NETSCOPE_NMAP_OS_DETECT` | `0`              | Set to `1` to enable Nmap `-O` |
-| `NETSCOPE_NMAP_TIMEOUT` | `120`             | Per Nmap chunk timeout         |
-| `NETSCOPE_NMAP_DISCOVERY_TIMEOUT` | `15`    | Nmap discovery booster timeout |
-| `NETSCOPE_AUTHORIZED_SCAN` | `0`             | Authorization acknowledgement  |
-| `NETSCOPE_ALLOW_PUBLIC_TARGETS` | `0`        | Permit public target ranges    |
-| `NETSCOPE_EXCLUDE_HOSTS` | _(empty)_         | Comma-separated exclusions     |
-| `NETSCOPE_CVE_DB`      | `config/cve_db.csv` | Path to CVE database           |
-| `NETSCOPE_OUTPUT_DIR`  | `reports`           | Report output directory        |
-| `NETSCOPE_LOG_LEVEL`   | `INFO`              | Logging level                  |
+| Variable                            | Default               | Description                        |
+| ----------------------------------- | --------------------- | ---------------------------------- |
+| `NETSCOPE_TIMEOUT`                | `1.5`               | Per-port TCP timeout (seconds)     |
+| `NETSCOPE_CONCURRENCY`            | `500`               | Max async connections              |
+| `NETSCOPE_PROBE_DELAY`            | `0`                 | Fixed delay before each probe      |
+| `NETSCOPE_PROBE_JITTER`           | `0`                 | Random additional probe delay      |
+| `NETSCOPE_MAX_RESULTS`            | `100000`            | Open-port row safety ceiling       |
+| `NETSCOPE_USE_NMAP`               | `1`                 | Set to `0` to disable Nmap       |
+| `NETSCOPE_NMAP_TIMING`            | `4`                 | Nmap timing template (0–5)        |
+| `NETSCOPE_NMAP_OS_DETECT`         | `0`                 | Set to `1` to enable Nmap `-O` |
+| `NETSCOPE_NMAP_TIMEOUT`           | `120`               | Per Nmap chunk timeout             |
+| `NETSCOPE_NMAP_DISCOVERY_TIMEOUT` | `15`                | Nmap discovery booster timeout     |
+| `NETSCOPE_AUTHORIZED_SCAN`        | `0`                 | Authorization acknowledgement      |
+| `NETSCOPE_ALLOW_PUBLIC_TARGETS`   | `0`                 | Permit public target ranges        |
+| `NETSCOPE_EXCLUDE_HOSTS`          | _(empty)_           | Comma-separated exclusions         |
+| `NETSCOPE_CVE_DB`                 | `config/cve_db.csv` | Path to CVE database               |
+| `NETSCOPE_OUTPUT_DIR`             | `reports`           | Report output directory            |
+| `NETSCOPE_LOG_LEVEL`              | `INFO`              | Logging level                      |
 
 ### CVE Database Format
 
@@ -563,19 +563,19 @@ pip-audit -r requirements.txt -r requirements-dev.txt
 
 ### Test Coverage
 
-| Module                 | Tests                                                                |
-| ---------------------- | -------------------------------------------------------------------- |
-| `validate_target`      | valid IP, CIDR /30, network too large, empty, invalid                |
-| `validate_ports`       | list, range, mixed, dedup, port 0, inverted range                    |
-| `identify_service`     | SSH/HTTP/FTP banner match, port fallback, unknown                    |
-| `parse_version`        | semver, 3-part, version keyword, no match                            |
-| `calculate_risk_score` | empty, severity fallback, CVSS score path, capped at 10              |
-| `CveDatabase`          | wildcard match, version-boundary match, no match, family match       |
-| Async scanner          | open port detected with real server, closed port ignored, multi-port |
-| Reports                | HTML escaping, JSON/CSV sanitization, metadata                       |
-| Dashboard              | API health/defaults, reports, file serving, local-network detection, active-job guard |
-| Diffing                | new/closed ports, new/resolved CVEs, risk changes                    |
-| Safety                 | public target authorization and exclusions                           |
+| Module                   | Tests                                                                                 |
+| ------------------------ | ------------------------------------------------------------------------------------- |
+| `validate_target`      | valid IP, CIDR /30, network too large, empty, invalid                                 |
+| `validate_ports`       | list, range, mixed, dedup, port 0, inverted range                                     |
+| `identify_service`     | SSH/HTTP/FTP banner match, port fallback, unknown                                     |
+| `parse_version`        | semver, 3-part, version keyword, no match                                             |
+| `calculate_risk_score` | empty, severity fallback, CVSS score path, capped at 10                               |
+| `CveDatabase`          | wildcard match, version-boundary match, no match, family match                        |
+| Async scanner            | open port detected with real server, closed port ignored, multi-port                  |
+| Reports                  | HTML escaping, JSON/CSV sanitization, metadata                                        |
+| Dashboard                | API health/defaults, reports, file serving, local-network detection, active-job guard |
+| Diffing                  | new/closed ports, new/resolved CVEs, risk changes                                     |
+| Safety                   | public target authorization and exclusions                                            |
 
 ---
 
@@ -591,7 +591,6 @@ docker build -t netscope:latest .
 docker run --rm --network host \
   -v $(pwd)/reports:/app/reports \
   netscope:latest -t 192.168.0.0/24 --discover-scan --no-nmap --authorize-scan
-
 ```
 
 ### Docker Compose
@@ -654,13 +653,13 @@ allow_public_targets: true
 
 ## Roadmap
 
-- [x] Async performance optimization (batched host scanning)
-- [x] Configurable concurrency and batch sizes
-- [x] Hardened service-family CVE matching logic
-- [x] Async integration testing for core scan/report paths
+- [X] Async performance optimization (batched host scanning)
+- [X] Configurable concurrency and batch sizes
+- [X] Hardened service-family CVE matching logic
+- [X] Async integration testing for core scan/report paths
 - [ ] Distributed Deployments: Worker topology for massive cross-subnet sweeps on enterprise estates.
 - [ ] Time-Series Subnet Analysis: Identify anomalous behavior (impromptu port openings) over sustained periods.
 - [ ] Response Extensibility: Automated triggering of rapid verification scripts based on discovered CVE profiles.
 - [ ] UDP scanning support
 - [ ] gRPC / REST API mode for integration into security dashboards
-- [x] Web dashboard (FastAPI) for interactive scanning, report analytics, and evidence review
+- [X] Web dashboard (FastAPI) for interactive scanning, report analytics, and evidence review
